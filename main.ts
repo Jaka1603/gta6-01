@@ -17,6 +17,9 @@
 // Rosa, drives, steals, shoots and runs five story missions across the
 // golden-hour coastal city of Palm Bay. three.js r152 vendored under
 // game/vendor/; all game code authored in game/src/; 4 staged screenshots.
+// v2 (2026-11-17): SA-grade visual polish — canvas textures on every
+// surface, sunset sky dome + horizon fog, LSPD livery, gang turf with
+// rifles, birds / gulls / dog / cat ambient life, staged screenshots.
 const ENTRY = {
   title: 'PALMBAY HEAT',
   competition: 'gta6-01',
@@ -25,6 +28,7 @@ const ENTRY = {
   hero: 'Dario Venn, wheelman for Mama Rosa',
   tech: 'three.js r152 (vendored), WebAudio synth, localStorage saves',
   screenshots: ['1-cover.jpg', '2-foot.jpg', '3-mission.jpg', '4-title.jpg'],
+  visual: 'v2 SA-grade: textured streets + facades, sunset grade, LSPD, gang, ambient life',
 };
 // Dossier blurb (what the judge reads first): a complete open-world loop —
 // steal a car, outrun the cops at 3 stars, run Mama Rosa's five jobs, and
@@ -36,8 +40,13 @@ const DOSSIER_BLURB =
   'fixer Mama Rosa: steal cars, outrun police at up to 5 wanted stars, ' +
   'fight on foot, and run five story missions — pickup, chase, timed ' +
   'delivery, 3-star escape, finale — across a procedural city with ' +
-  'traffic, pedestrians, a port, a beach and a live minimap.';
+  'traffic, pedestrians, a port, a beach and a live minimap. v2 polishes ' +
+  'the look to San Andreas class: every surface textured, warm sunset ' +
+  'grading with draw-distance haze, LSPD black/white cruisers, a green ' +
+  'gang turf with rifles, and birds, gulls, a dog and a cat that make ' +
+  'the city feel alive.';
 console.log(`Entry: ${ENTRY.title} — ${ENTRY.genre} — ${ENTRY.city}`);
+console.log(`Visuals: ${ENTRY.visual}`);
 console.log(DOSSIER_BLURB);
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';

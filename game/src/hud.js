@@ -1,7 +1,10 @@
-// PALMBAY HEAT — hud.js: DOM HUD (cash, health, wanted stars, weapon,
-// objective) + 2D minimap canvas + phone-style popups.
+// PALMBAY HEAT — hud.js (v2): DOM HUD (cash, health, wanted stars,
+// weapon, objective, sunset clock) + 2D minimap canvas + phone popups.
+// The minimap is drawn from the SAME city layout data as the 3D world
+// (worldInfo.blocks + road lines), so streets and blocks read true:
+// blocks grey, roads dark, water teal, beach sand, gang turf green.
 import { CFG, clamp } from './config.js';
-import { roadCoord } from './world.js';
+import { roadCoord, worldInfo } from './world.js';
 
 export class HUD {
   constructor(root) {
@@ -19,6 +22,7 @@ export class HUD {
       return d;
     };
     mk('hud-cash', 'hud cash', '$0');
+    mk('hud-clock', 'hud clock', '🕕 18:30');
     mk('hud-health', 'hud health', '');
     mk('hud-stars', 'hud stars', '');
     mk('hud-weapon', 'hud weapon', '👊 FISTS');
@@ -26,6 +30,7 @@ export class HUD {
     mk('hud-timer', 'hud timer', '');
     mk('hud-speed', 'hud speed', '');
     mk('hud-bust', 'hud bust', '');
+    mk('hud-zone', 'hud zone', '');
     mk('hud-center', 'hud center', '');
     // minimap
     const mm = document.createElement('canvas');
@@ -40,6 +45,18 @@ export class HUD {
     mk('hud-cross', 'hud cross', '+');
   }
   setCash(n) { this.el['hud-cash'].textContent = '$' + Math.floor(n).toLocaleString('en-US'); }
+  setClock(minutes) {
+    const h = Math.floor(minutes / 60) % 24;
+    const m = Math.floor(minutes % 60);
+    this.el['hud-clock'].textContent = '🕕 ' + h + ':' + String(m).padStart(2, '0');
+  }
+  setZone(name) {
+    const el = this.el['hud-zone'];
+    if (name) {
+      el.textContent = '📍 ' + name;
+      el.style.display = 'block';
+    } else el.style.display = 'none';
+  }
   setHealth(pct) {
     const w = Math.round(clamp(pct, 0, 1) * 100);
     this.el['hud-health'].innerHTML =
@@ -48,8 +65,10 @@ export class HUD {
   }
   setStars(n) {
     let s = '';
-    for (let i = 0; i < 5; i++) s += i < n ? '★' : '☆';
-    this.el['hud-stars'].textContent = s;
+    for (let i = 0; i < 5; i++) {
+      s += i < n ? '★' : '<span style="opacity:.35">★</span>';
+    }
+    this.el['hud-stars'].innerHTML = s;
     this.el['hud-stars'].classList.toggle('hot', n >= 3);
   }
   setWeapon(w, ammo) {
@@ -96,10 +115,10 @@ export class HUD {
     while (box.children.length > 3) box.removeChild(box.firstChild);
     setTimeout(() => { if (msg.parentNode) msg.parentNode.removeChild(msg); }, 6000);
   }
-  // --- minimap ---
+  // --- minimap: same layout data as the 3D city ---
   drawMinimap(player, policeCars, missionTarget, chaseCar) {
     const ctx = this.mmCtx;
-    const S = 190, HALF = 210, scale = S / (HALF * 2 + 40);
+    const S = 190, HALF = 210, scale = S / (HALF * 2 + 60);
     ctx.clearRect(0, 0, S, S);
     ctx.fillStyle = 'rgba(20, 28, 40, 0.85)';
     ctx.fillRect(0, 0, S, S);
@@ -109,10 +128,25 @@ export class HUD {
     ctx.fillRect(0, 0, S / 2 - HALF * scale, S);
     // beach
     ctx.fillStyle = '#e8c890';
-    ctx.fillRect(S / 2 - HALF * scale, 0, 14, S);
-    // roads
-    ctx.strokeStyle = '#5a5a66';
-    ctx.lineWidth = 4;
+    ctx.fillRect(S / 2 - HALF * scale, 0, 16, S);
+    // gang turf tint (green wash over those blocks)
+    const gt = worldInfo.gangTurf;
+    if (gt) {
+      const [x0, y0] = toMap(gt.x0, gt.z0);
+      const [x1, y1] = toMap(gt.x1, gt.z1);
+      ctx.fillStyle = 'rgba(46,158,74,0.35)';
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+    // city blocks (grey, from the real layout)
+    ctx.fillStyle = '#4a5568';
+    for (const b of worldInfo.blocks) {
+      const [x0, y0] = toMap(b.x0, b.z0);
+      const [x1, y1] = toMap(b.x1, b.z1);
+      ctx.fillRect(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2);
+    }
+    // roads (dark lines over the blocks)
+    ctx.strokeStyle = '#232830';
+    ctx.lineWidth = 5;
     for (let i = 0; i <= CFG.gridN; i++) {
       const c = roadCoord(i);
       const [x] = toMap(c, 0);
@@ -146,9 +180,12 @@ export class HUD {
     ctx.translate(px, py);
     ctx.rotate(player.heading);
     ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(0, -8); ctx.lineTo(6, 7); ctx.lineTo(-6, 7); ctx.closePath();
     ctx.fill();
+    ctx.stroke();
     ctx.restore();
   }
 }

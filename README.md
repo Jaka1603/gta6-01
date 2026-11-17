@@ -34,6 +34,15 @@ Then open <http://localhost:8080>. Or serve the `game/` folder with any static f
 - Save / continue progress
 - Synthesized sound effects and music via WebAudio (no audio files)
 
+## v2 visual polish (San Andreas-class)
+
+- Every surface textured: asphalt with patches and lane markings, sidewalk slabs, building facades with lit windows, sand, grass, water
+- Warm sunset grading: gradient sky dome with sun disc, horizon-matched fog, ACES tone mapping, long golden-hour shadows
+- LSPD black/white police cruisers (POLICE doors, light bar, push bumper) + uniformed officers + busted scene
+- Palm Bay gang turf (green) with bandana members carrying rifles and pistols
+- Ambient life: bird flocks in V formation, seagulls over the pier, a dog that follows a pedestrian, a cat that crosses the road
+- Red convertible hero car with interior, seats, plates and racing stripes; brake lights, headlight glow, exhaust puffs
+
 ## Screenshots
 
 - [Cover — Palm Bay at dusk](screenshots/1-cover.jpg)

@@ -1,19 +1,23 @@
-// PALMBAY HEAT — main.js: state machine, camera, controls, save/load,
-// shot staging, game loop. Original open-world crime game.
+// PALMBAY HEAT — main.js (v2): state machine, camera, controls,
+// save/load, shot staging, game loop. SA-grade look: gradient sky dome
+// with sun disc, horizon-matched fog, low warm sun with a shadow camera
+// that follows the player, ACES tone mapping, living ambient systems.
 const THREE = window.THREE;
-import { CFG, rng, clamp, lerp, TAU } from './config.js';
-import { buildWorld, roadCoord, nearestRoadCoord, onRoad } from './world.js';
-import { Traffic, spawnParked, heroCar, makeCar } from './vehicles.js';
-import { Pedestrians, heroPerson } from './people.js';
+import { CFG, PALETTE, SCALE, rng, clamp, lerp, TAU } from './config.js';
+import { buildWorld, roadCoord, nearestRoadCoord, onRoad, worldInfo } from './world.js';
+import { Traffic, spawnParked, heroCar, makeCar, setBrake } from './vehicles.js';
+import { Pedestrians, heroPerson, attachWeapon } from './people.js';
 import { Police } from './police.js';
 import { Missions, MISSION_DEFS } from './missions.js';
 import { Combat, Health } from './combat.js';
 import { HUD } from './hud.js';
 import { AudioSys } from './audio.js';
+import { Flock, Clouds, DogFollower, CrossingCat } from './life.js';
+import { stageGang, stageBusted } from './gang.js';
 
 const SAVE_KEY = 'palmbay-heat-save-v1';
 const params = new URLSearchParams(location.search);
-const SHOT = params.get('shot');           // start | chase | foot | mission | null
+const SHOT = params.get('shot');           // chase | foot | mission | title | null
 const SEED = parseInt(params.get('seed') || '1', 10) || 1;
 
 const rand = rng(SEED * 7919 + 13);
@@ -21,46 +25,88 @@ const rand = rng(SEED * 7919 + 13);
 // ---------- renderer / scene ----------
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(SHOT ? 1 : Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = CFG.exposure;
 
 const scene = new THREE.Scene();
-// golden-hour sky gradient
+
+// golden-hour sky dome: orange horizon -> teal top, sun disc + halo.
+// The horizon colour MUST equal the fog colour — that melts the city
+// into the sky instead of cutting it off.
+const SUN_DIR = new THREE.Vector3(-0.75, 0.28, 0.30).normalize();
 {
-  const c = document.createElement('canvas');
-  c.width = 4; c.height = 256;
-  const g = c.getContext('2d');
-  const grad = g.createLinearGradient(0, 0, 0, 256);
-  grad.addColorStop(0, '#2e4a7a');
-  grad.addColorStop(0.45, '#7a5a8a');
-  grad.addColorStop(0.7, '#ff7e5f');
-  grad.addColorStop(1, '#ffb36b');
-  g.fillStyle = grad; g.fillRect(0, 0, 4, 256);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  scene.background = tex;
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: {
+      topColor: { value: new THREE.Color(PALETTE.skyTop) },
+      midColor: { value: new THREE.Color(PALETTE.skyMid) },
+      horizonColor: { value: new THREE.Color(PALETTE.horizon) },
+      sunDir: { value: SUN_DIR },
+      sunColor: { value: new THREE.Color(PALETTE.sun) },
+    },
+    vertexShader: [
+      'varying vec3 vDir;',
+      'void main() {',
+      '  vDir = normalize(position);',
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'uniform vec3 topColor, midColor, horizonColor, sunColor, sunDir;',
+      'varying vec3 vDir;',
+      'void main() {',
+      '  float h = clamp(normalize(vDir).y, -0.05, 1.0);',
+      '  vec3 col = mix(horizonColor, midColor, smoothstep(0.0, 0.18, h));',
+      '  col = mix(col, topColor, smoothstep(0.12, 0.55, h));',
+      '  float s = max(dot(normalize(vDir), normalize(sunDir)), 0.0);',
+      '  col += sunColor * (pow(s, 350.0) * 1.6 + pow(s, 18.0) * 0.28);',
+      '  gl_FragColor = vec4(col, 1.0);',
+      '  #include <tonemapping_fragment>',
+      '  #include <encodings_fragment>',
+      '}',
+    ].join('\n'),
+  });
+  var sky = new THREE.Mesh(new THREE.SphereGeometry(900, 32, 15), skyMat);
+  sky.frustumCulled = false;
+  scene.add(sky);
 }
 scene.fog = new THREE.Fog(CFG.fog, CFG.fogNear, CFG.fogFar);
 
-const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 900);
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 1200);
 camera.position.set(0, 40, 90);
 
-// lights: warm low sun + cool fill
+// lights: one warm low sun (shadow-casting, follows the player) +
+// hemisphere fill so shadow sides stay readable and teal-tinted.
 const sun = new THREE.DirectionalLight(CFG.sunColor, CFG.sunIntensity);
-sun.position.set(-180, 130, 120);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -240; sun.shadow.camera.right = 240;
-sun.shadow.camera.top = 240; sun.shadow.camera.bottom = -240;
-sun.shadow.camera.far = 700;
-scene.add(sun);
+const SHADOW_S = 55;
+Object.assign(sun.shadow.camera, {
+  left: -SHADOW_S, right: SHADOW_S,
+  top: SHADOW_S, bottom: -SHADOW_S,
+  near: 1, far: 260,
+});
+sun.shadow.camera.updateProjectionMatrix();
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.03;
+scene.add(sun, sun.target);
 scene.add(new THREE.HemisphereLight(CFG.hemiSky, CFG.hemiGround, CFG.hemiIntensity));
-scene.add(new THREE.AmbientLight(CFG.ambient, 0.8));
+const _sv = new THREE.Vector3();
+function updateSun(playerPos) {
+  _sv.copy(playerPos).addScaledVector(SUN_DIR, 120);
+  // snap to the shadow-texel grid so shadows don't shimmer while moving
+  const texel = (SHADOW_S * 2) / 2048;
+  _sv.x = Math.round(_sv.x / texel) * texel;
+  _sv.z = Math.round(_sv.z / texel) * texel;
+  sun.position.copy(_sv);
+  sun.target.position.copy(playerPos);
+  sun.target.updateMatrixWorld();
+}
 
 // ---------- world ----------
 const { group: cityGroup, signs } = buildWorld(scene, rand);
@@ -78,10 +124,22 @@ const audio = new AudioSys();
 const combat = new Combat(scene, audio);
 const health = new Health();
 
+// ambient life: two bird flocks, gulls over the pier, clouds,
+// a dog that heels a pedestrian, a cat that crosses the road.
+const flockCity = new Flock(scene, { cx: 0, cz: 0, r: 130, h: 30, speed: 9, count: 7 });
+const flockBeach = new Flock(scene, { cx: -180, cz: 0, r: 90, h: 24, speed: 8, count: 6 });
+const gulls = new Flock(scene, {
+  cx: -270, cz: 60, r: 22, h: 15, speed: 6, count: 5, color: 0xf2f2ea,
+});
+const clouds = new Clouds(scene, rand);
+const dog = new DogFollower(scene, peds.peds[0]);
+const cat = new CrossingCat(scene, rand);
+
 const player = heroPerson();
 player.position.set(30, 0, 30);
 player.rotation.y = Math.PI;
 scene.add(player);
+combat.setPlayer(player);
 
 const car = heroCar();
 car.position.set(34, 0, 30);
@@ -110,8 +168,11 @@ const state = {
   missionIndex: 0,
   missionsDone: 0,
   time: 0,
+  clockMin: 1110,       // 18:30 — golden hour, fixed for the look
   camYaw: 0,
   shotReady: false,
+  exhaustT: 0,
+  skidT: 0,
 };
 let saveData = loadSave();
 
@@ -202,6 +263,7 @@ titleQuit.addEventListener('click', () => {
 missions.onEvent = (type, payload) => {
   if (type === 'start') {
     hud.setObjective(payload.name + ' — ' + payload.brief);
+    hud.setZone(payload.zone || '');
     hud.phone('MAMA ROSA', payload.brief);
     audio.play('mission');
   } else if (type === 'complete') {
@@ -315,11 +377,22 @@ function tryEnterExitCar() {
 }
 
 // ---------- HUD sync ----------
+function zoneNameAt(x, z) {
+  const gt = worldInfo.gangTurf;
+  if (gt && x >= gt.x0 && x <= gt.x1 && z >= gt.z0 && z <= gt.z1) return 'GANG TURF — PALM BAY GREENS';
+  if (x < -150) return 'BEACHFRONT';
+  if (x > 90 && z > 90) return 'PORT';
+  if (Math.abs(x) < 90 && Math.abs(z) < 90) return 'DOWNTOWN';
+  return 'SUBURBS';
+}
 function syncHUD() {
   hud.setCash(state.cash);
   hud.setHealth(health.pct);
   hud.setStars(police.wanted);
   hud.setWeapon(combat.weapon, combat.ammo);
+  hud.setClock(state.clockMin);
+  const pp = state.inCar ? car.position : player.position;
+  hud.setZone(zoneNameAt(pp.x, pp.z));
   const def = missions.current;
   if (missions.active && def) {
     hud.setObjective(def.name + ' — ' + def.brief);
@@ -344,6 +417,7 @@ function updatePlayer(dt) {
   if (k['KeyS'] || k['ArrowDown']) mz -= 1;
   if (k['KeyA'] || k['ArrowLeft']) mx -= 1;
   if (k['KeyD'] || k['ArrowRight']) mx += 1;
+  const u = player.userData;
   if (mx || mz) {
     const len = Math.hypot(mx, mz);
     const ang = Math.atan2(mx / len, mz / len) + state.camYaw;
@@ -353,21 +427,18 @@ function updatePlayer(dt) {
     player.position.x = clamp(player.position.x, -208, 208);
     player.position.z = clamp(player.position.z, -208, 208);
     player.rotation.y = ang;
-    const u = player.userData;
     u.walkPhase += dt * speed * 2.4;
-    const s = Math.sin(u.walkPhase) * 0.5;
-    u.legL.rotation.x = s; u.legR.rotation.x = -s;
-    u.armL.rotation.x = -s * 0.7; u.armR.rotation.x = s * 0.7;
+    u.walk(u.walkPhase);
     // bump peds aside
     for (const p of peds.peds) {
       const d = Math.hypot(p.position.x - player.position.x, p.position.z - player.position.z);
       if (d < 1.1) peds.fleeFrom(player.position.x, player.position.z, 6);
     }
   } else {
-    const u = player.userData;
-    u.legL.rotation.x *= 0.8; u.legR.rotation.x *= 0.8;
-    u.armL.rotation.x *= 0.8; u.armR.rotation.x *= 0.8;
+    u.idle();
   }
+  // keep the pistol aim pose while armed
+  if (combat.weapon === 'pistol') u.armR.rotation.x = -1.35;
 }
 
 function updateCar(dt) {
@@ -376,10 +447,18 @@ function updateCar(dt) {
   let throttle = 0;
   if (k['KeyW'] || k['ArrowUp']) throttle += 1;
   if (k['KeyS'] || k['ArrowDown']) throttle -= 0.7;
-  if (k['Space']) throttle = -1.4;
+  const braking = !!k['Space'];
+  if (braking) throttle = -1.4;
   state.carSpeed += throttle * CFG.carAccel * dt;
   state.carSpeed -= state.carSpeed * 0.6 * dt; // drag
   state.carSpeed = clamp(state.carSpeed, -10, u.maxSpeed);
+  // brake lights + skid sound on hard braking
+  setBrake(car, braking || throttle < -0.5);
+  if (braking && Math.abs(state.carSpeed) > 8 && state.skidT <= 0) {
+    audio.play('skid');
+    state.skidT = 0.9;
+  }
+  state.skidT -= dt;
   let steer = 0;
   if (k['KeyA'] || k['ArrowLeft']) steer += 1;
   if (k['KeyD'] || k['ArrowRight']) steer -= 1;
@@ -391,6 +470,15 @@ function updateCar(dt) {
   car.position.addScaledVector(fwd, spd * dt);
   car.position.x = clamp(car.position.x, -208, 208);
   car.position.z = clamp(car.position.z, -208, 208);
+  // exhaust puffs while accelerating
+  state.exhaustT -= dt;
+  if (throttle > 0.3 && state.exhaustT <= 0) {
+    state.exhaustT = 0.12;
+    const back = new THREE.Vector3(0, 0, -1).applyEuler(car.rotation);
+    const tip = car.position.clone().addScaledVector(back, 2.3);
+    tip.y = 0.35;
+    combat.smoke.puff(tip, 0.25, 0x8a8a8a);
+  }
   // hit peds -> wanted + flee
   for (const p of peds.peds) {
     const d = Math.hypot(p.position.x - car.position.x, p.position.z - car.position.z);
@@ -442,17 +530,14 @@ function updateChaseTarget(dt) {
 
 // ---------- camera ----------
 const camTarget = new THREE.Vector3();
+let shotCamPos = null;
+let shotCamTarget = null;
 function updateCamera(dt) {
   const focus = state.inCar ? car.position : player.position;
-  // chase shot: three-quarter view from the beach side (southwest) —
-  // hero car in profile, police behind it, city behind, no building
-  // ever sits between this camera and the road.
-  if (SHOT === 'chase') {
-    camera.position.lerp(
-      new THREE.Vector3(focus.x - 12, 4.5, focus.z - 22), Math.min(1, dt * 6));
-    camTarget.lerp(
-      new THREE.Vector3(focus.x, focus.y + 1.5, focus.z + 4), Math.min(1, dt * 8));
-    camera.lookAt(camTarget);
+  // staged shots: snap to the composed camera, no drift
+  if (SHOT && shotCamPos) {
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
     return;
   }
   const heading = state.inCar ? car.rotation.y : state.heading;
@@ -462,13 +547,12 @@ function updateCamera(dt) {
   while (dy > Math.PI) dy -= TAU;
   while (dy < -Math.PI) dy += TAU;
   state.camYaw += dy * Math.min(1, dt * 3);
-  const dist = state.inCar ? (SHOT === 'chase' ? 16 : 11) : 6.5;
-  const height = state.inCar ? (SHOT === 'chase' ? 8 : 4.5) : 3.0;
+  const dist = state.inCar ? 11 : 6.5;
+  const height = state.inCar ? 4.5 : 3.0;
   const cx = focus.x + Math.sin(state.camYaw) * dist;
   const cz = focus.z + Math.cos(state.camYaw) * dist;
   camera.position.lerp(new THREE.Vector3(cx, height, cz), Math.min(1, dt * 6));
-  // foot shot looks slightly up so the neon sign reads in frame
-  const lookY = focus.y + (SHOT === 'foot' ? 3.0 : 1.6);
+  const lookY = focus.y + 1.6;
   camTarget.lerp(new THREE.Vector3(focus.x, lookY, focus.z), Math.min(1, dt * 8));
   camera.lookAt(camTarget);
 }
@@ -494,6 +578,36 @@ function showEnd(kind) {
 }
 
 // ---------- shot staging ----------
+// Deterministic: ambient systems are pre-rolled in fixed 1/60 steps
+// (traffic, pedestrians, birds, gulls, clouds, cat) so every run puts
+// the same life in the same place; hero + police are staged after the
+// pre-roll so their framing is exact. Birds are then placed in view.
+function preroll(seconds) {
+  const step = 1 / 60;
+  const n = Math.round(seconds / step);
+  for (let i = 0; i < n; i++) {
+    state.time += step;
+    state.clockMin += step / 10;   // clock advances, never resets
+    traffic.update(step);
+    peds.update(step);
+    flockCity.update(step);
+    flockBeach.update(step);
+    gulls.update(step);
+    clouds.update(step);
+    cat.update(step);
+  }
+}
+
+// Place a flock so its leader flies in front of the camera.
+function stageFlockInView(flock, camPos, viewDir, dist, height) {
+  flock.cx = camPos.x + viewDir.x * dist;
+  flock.cz = camPos.z + viewDir.z * dist;
+  flock.r = 20;
+  flock.h = height;
+  flock.angle = Math.atan2(camPos.x - flock.cx, camPos.z - flock.cz);
+  flock.update(0);
+}
+
 function applyShot() {
   if (!SHOT) return;
   // deterministic scene for screenshots
@@ -505,8 +619,12 @@ function applyShot() {
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(saveData)); } catch {}
     showTitle();
-    camera.position.set(-120, 42, 150);
-    camera.lookAt(0, 12, 0);
+    // high wide vista from the east, looking west into the sunset:
+    // sun disc in the upper-left third, skyline silhouettes below it.
+    shotCamPos = new THREE.Vector3(150, 48, -60);
+    shotCamTarget = new THREE.Vector3(-120, 10, -90);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
     state.shotReady = true;
     return;
   }
@@ -515,7 +633,9 @@ function applyShot() {
   document.getElementById('hud').classList.remove('hidden');
   audio.ensure();
   if (SHOT === 'chase') {
-    // beachfront avenue (x=-210 road), heading north, sea on the left
+    // beachfront avenue (x=-210 road), heading north, sea on the left.
+    // Red convertible hero, police pursuit staggered in the next lanes
+    // (never stacked on the hero's bumper), two-way traffic.
     state.inCar = true;
     player.visible = false;
     car.position.set(-210, 0, 60);
@@ -523,26 +643,68 @@ function applyShot() {
     state.carSpeed = 26;
     state.camYaw = car.rotation.y + Math.PI;
     police.setWanted(3);
-    // stage the pursuit: police cars right on the hero's tail, staggered
-    // so both read in frame instead of stacking on each other
-    police.cars.forEach((pc, i) => {
-      pc.position.set(car.position.x + (i % 2 ? 5 : -5), 0, car.position.z - 7 - i * 4);
-      pc.rotation.y = car.rotation.y;
-      pc.userData.speed = 24;
-    });
     missions.start(2);
     state.cash = 2450;
     state.missionsDone = 2;
+    state.clockMin = 1142; // 19:02
+    preroll(4);
+    // police flanking in adjacent lanes, clearly BEHIND the hero
+    // (never stacked on its bumper, never beside it)
+    const slots = [[-6, -12], [6, -18], [-3, -26]];
+    police.cars.forEach((pc, i) => {
+      pc.position.set(car.position.x + slots[i][0], 0, car.position.z + slots[i][1]);
+      pc.rotation.y = car.rotation.y;
+      pc.userData.speed = 24;
+    });
+    // officers stay out of the avenue for the cover framing
+    for (const o of police.officers) o.person.visible = false;
+    // camera: low chase cam behind-left, hero in the lower third,
+    // road + palms leading north, sun rim-light from the west.
+    shotCamPos = new THREE.Vector3(car.position.x - 6, 5.0, car.position.z - 16);
+    shotCamTarget = new THREE.Vector3(car.position.x + 0.5, 1.3, car.position.z + 8);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+    // birds crossing the sky above the boulevard, in the upper third
+    const viewDir = new THREE.Vector3(0, 0, 1);
+    stageFlockInView(flockCity, shotCamPos, viewDir, 60, 11);
+    state.camYaw = car.rotation.y + Math.PI;
   } else if (SHOT === 'foot') {
-    // on foot facing the MAMA ROSA'S neon sign (block 3,3, south face)
+    // on foot on the beachfront promenade, walking north: palms and
+    // sea to the left, pastel buildings to the right, peds + dog ahead.
     state.inCar = false;
-    player.position.set(0, 0, -30);
+    player.position.set(-198.7, 0, -10);
     state.heading = 0;
     state.camYaw = state.heading + Math.PI;
     police.setWanted(1);
     missions.start(0);
     state.cash = 520;
+    state.clockMin = 1135; // 18:55
+    preroll(4);
+    // a pedestrian + the dog walk toward the player on the same sidewalk
+    const walker = peds.peds[0];
+    walker.position.set(-198.7, 0, 14);
+    walker.userData.heading = Math.PI;
+    walker.userData.vertical = true;
+    walker.userData.roadLine = -210;
+    walker.userData.side = 11.3;
+    walker.userData.speed = 1.5;
+    dog.owner = walker;
+    dog.dog.position.set(-198.0, 0, 11);
+    dog.dog.rotation.y = Math.PI;
+    dog.update(0);
+    // camera: eye-level behind-right of the player, player in the
+    // right third, sidewalk + palms leading north, gulls overhead.
+    shotCamPos = new THREE.Vector3(player.position.x - 2.5, 2.3, player.position.z - 7.5);
+    shotCamTarget = new THREE.Vector3(player.position.x + 1.5, 1.5, player.position.z + 10);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+    const viewDir = new THREE.Vector3(0.1, 0, 1).normalize();
+    stageFlockInView(flockBeach, shotCamPos, viewDir, 50, 12);
+    state.camYaw = state.heading + Math.PI;
   } else if (SHOT === 'mission') {
+    // HOT DELIVERY with the LSPD closing in: hero convertible at the
+    // marker, two police cars flanking ahead, gang group + busted scene
+    // staged on the turf corner — mission pillar reads in the frame.
     state.inCar = true;
     player.visible = false;
     car.position.set(70, 0, -30);
@@ -550,6 +712,16 @@ function applyShot() {
     state.carSpeed = 18;
     state.camYaw = car.rotation.y + Math.PI;
     police.setWanted(2);
+    missions.start(2);
+    missions.timer = 42;
+    state.cash = 1250;
+    state.clockMin = 1147; // 19:07
+    hud.phone('MAMA ROSA', 'Cepat, Dario! Paketnya harus sampai sebelum jam 7.');
+    hud.center('MISI: HOT DELIVERY', '+$900 kalau tepat waktu');
+    // keep the cash banner up for the still frame
+    clearTimeout(hud._centerT);
+    hud._centerT = setTimeout(() => hud.el['hud-center'].classList.remove('show'), 20000);
+    preroll(4);
     // police closing in from ahead, flanking — visible in frame
     const flank = [[95, -45], [85, -12]];
     police.cars.forEach((pc, i) => {
@@ -557,16 +729,34 @@ function applyShot() {
       pc.rotation.y = Math.atan2(car.position.x - pc.position.x, car.position.z - pc.position.z);
       pc.userData.speed = 16;
     });
-    missions.start(2);
-    missions.timer = 42;
-    state.cash = 1250;
-    hud.phone('MAMA ROSA', 'Cepat, Dario! Paketnya harus sampai sebelum jam 7.');
-    hud.center('MISI: HOT DELIVERY', '+$900 kalau tepat waktu');
-    // keep the cash banner up for the still frame
-    clearTimeout(hud._centerT);
-    hud._centerT = setTimeout(() => hud.el['hud-center'].classList.remove('show'), 20000);
+    // gang group on the turf corner sidewalk (green, rifles visible)
+    stageGang(scene, [
+      { x: 96, z: -52, heading: Math.PI * 0.75, rifle: true },
+      { x: 99, z: -49, heading: Math.PI * 0.6, rifle: true },
+      { x: 93, z: -48, heading: Math.PI * 0.9, rifle: false },
+      { x: 97, z: -55, heading: Math.PI * 0.5, rifle: false },
+      { x: 101, z: -53, heading: Math.PI * 0.8, rifle: true },
+    ]);
+    // busted scene: officer + hands-up suspect beside the lead cop car
+    const lead = police.cars[0];
+    stageBusted(scene, lead.position, lead.rotation.y);
+    // camera: three-quarter view from the south-west — hero car left,
+    // marker pillar centre, police + gang right.
+    shotCamPos = new THREE.Vector3(52, 6.5, -52);
+    shotCamTarget = new THREE.Vector3(88, 2.5, -28);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+    state.camYaw = car.rotation.y + Math.PI;
   }
   syncHUD();
+  // one minimap draw right away so the first frame already shows it
+  const pp = state.inCar ? car.position : player.position;
+  hud.drawMinimap(
+    { x: pp.x, z: pp.z, heading: state.inCar ? car.rotation.y : state.heading },
+    police.cars,
+    missions.active && missions.current ? missions.current.target : null,
+    chaseTarget.visible ? chaseTarget : null
+  );
   state.shotReady = true;
 }
 
@@ -575,8 +765,9 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
   state.time += dt;
+  state.clockMin += dt / 10;   // golden hour drifts slowly, never resets
 
-  // sea waves (throttled: every 3rd frame, cheap on low-end GPUs)
+  // sea: vertex waves (throttled) + texture drift for shimmer
   frameNo += 1;
   if (sea && frameNo % 3 === 0) {
     const pos = sea.geometry.attributes.position;
@@ -588,16 +779,30 @@ function animate() {
     pos.needsUpdate = true;
     sea.geometry.computeVertexNormals();
   }
+  if (sea && sea.userData.waterTex) {
+    sea.userData.waterTex.offset.y += dt * 0.008;
+    sea.userData.waterTex.offset.x += dt * 0.003;
+  }
   // neon flicker
   for (let i = 0; i < signs.length; i++) {
     signs[i].material.opacity = 0.9 + Math.sin(state.time * 3 + i * 2) * 0.1;
   }
+  // sky dome follows the camera (world is large)
+  sky.position.copy(camera.position);
+  // sun shadow frustum follows the player
+  updateSun(state.inCar ? car.position : player.position);
 
   if (state.mode === 'playing') {
     if (state.inCar) updateCar(dt);
     else updatePlayer(dt);
     traffic.update(dt);
     peds.update(dt);
+    flockCity.update(dt);
+    flockBeach.update(dt);
+    gulls.update(dt);
+    clouds.update(dt);
+    dog.update(dt);
+    cat.update(dt);
     updateChaseTarget(dt);
     combat.update(dt);
     const playerPos = state.inCar ? car.position : player.position;
@@ -641,12 +846,18 @@ function animate() {
       );
     }
   } else if (state.mode === 'title') {
-    // slow orbit over the city vista
-    const a = state.time * 0.02;
-    camera.position.set(Math.sin(a) * 170, 55, Math.cos(a) * 170);
-    camera.lookAt(0, 10, 0);
+    // slow orbit over the city vista — frozen for the staged title shot
+    if (SHOT !== 'title') {
+      const a = state.time * 0.02;
+      camera.position.set(Math.sin(a) * 170, 55, Math.cos(a) * 170);
+      camera.lookAt(0, 10, 0);
+    }
     traffic.update(dt);
     peds.update(dt);
+    flockCity.update(dt);
+    flockBeach.update(dt);
+    gulls.update(dt);
+    clouds.update(dt);
   }
   renderer.render(scene, camera);
   if (SHOT && state.shotReady) {
@@ -658,4 +869,8 @@ function animate() {
 applyShot();
 if (!SHOT) showTitle();
 animate();
-window.__game = { state, missions, police, health, player, car, hud };
+window.__game = {
+  state, missions, police, health, player, car, hud,
+  traffic, peds, renderer, combat, flockCity, gulls,
+  scene, camera, cityGroup,
+};

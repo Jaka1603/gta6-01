@@ -15,7 +15,9 @@ export const MISSION_DEFS = [
     id: 2, name: 'THE CHASE',
     brief: 'A rival crew took the package. Chase the blue sedan and ram it 3 times!',
     target: [120, -120], time: 0, reward: CFG.missionReward[1],
-    chase: true, text: 'Kejar sedan biru itu!',
+    // v2: mission 2's chase runs through gang turf (green zone on the
+  // minimap) — the rival crew's home ground.
+  chase: true, text: 'Kejar sedan biru itu!', zone: 'GANG TURF',
   },
   {
     id: 3, name: 'HOT DELIVERY',
@@ -87,10 +89,22 @@ export class Missions {
     const light = new THREE.PointLight(0xffd23f, 1.2, 30);
     light.position.y = 6;
     g.add(light);
+    // rotating beacon cone above the pillar (reads from far away)
+    const beacon = new THREE.Mesh(
+      new THREE.ConeGeometry(3.2, 9, 12, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd23f, transparent: true, opacity: 0.22,
+        side: THREE.DoubleSide, depthWrite: false,
+      })
+    );
+    beacon.position.y = 30;
+    beacon.rotation.x = Math.PI;
+    g.add(beacon);
     g.position.set(x, 0, z);
     this.scene.add(g);
     this.marker = g;
     this.markerLight = light;
+    this.markerBeacon = beacon;
   }
   clearMarker() {
     if (this.marker) {
@@ -109,10 +123,13 @@ export class Missions {
         return 'failed';
       }
     }
-    // marker pulse
+    // marker pulse + beacon spin
     if (this.marker) {
       const s = 1 + Math.sin(performance.now() * 0.004) * 0.12;
       this.marker.scale.set(s, 1, s);
+      if (this.markerBeacon) {
+        this.markerBeacon.rotation.y += dt * 1.5;
+      }
     }
     // escape mission: complete when wanted drops to 0
     if (def.escape) return null; // main checks wanted

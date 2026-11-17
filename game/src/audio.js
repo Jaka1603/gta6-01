@@ -112,6 +112,8 @@ export class AudioSys {
       case 'busted': this.blip(220, 0.5, 'sawtooth', 0.2); break;
       case 'wasted': this.blip(110, 0.8, 'sawtooth', 0.25); break;
       case 'mission': this.blip(660, 0.15); setTimeout(() => this.blip(990, 0.3), 120); break;
+      case 'screech': this.noise(0.3, 0.22, 900); break;
+      case 'skid': this.noise(0.18, 0.15, 1400); break;
     }
   }
   toggleMute() {

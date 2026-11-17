@@ -1,7 +1,11 @@
-// PALMBAY HEAT — combat.js: melee + shooting (raycast, muzzle flash,
-// health), NPC reactions.
+// PALMBAY HEAT — combat.js (v2): melee + shooting (raycast, pooled
+// muzzle flash, impact sparks, smoke), NPC reactions. The pistol is a
+// real mesh in the player's right hand; firing shows a glow flash, a
+// star burst and a point-light spike, and impacts throw pooled sparks.
 const THREE = window.THREE;
 import { CFG, clamp } from './config.js';
+import { MuzzleFlash, Sparks, Smoke } from './effects.js';
+import { attachWeapon, detachWeapon } from './people.js';
 
 export class Combat {
   constructor(scene, audio) {
@@ -10,23 +14,34 @@ export class Combat {
     this.weapon = 'fists';   // fists | pistol
     this.ammo = 12;
     this.cooldown = 0;
-    this.flash = null;
-    this.flashT = 0;
+    this.player = null;
     this.raycaster = new THREE.Raycaster();
+    this.flash = new MuzzleFlash(scene);
+    this.sparks = new Sparks(scene);
+    this.smoke = new Smoke(scene);
+    this._tmp = new THREE.Vector3();
+  }
+  setPlayer(player) {
+    this.player = player;
   }
   setWeapon(w) {
     this.weapon = w;
     if (w === 'pistol' && this.ammo <= 0) this.ammo = 12;
+    if (!this.player) return;
+    if (w === 'pistol') {
+      attachWeapon(this.player, 'pistol');
+      // aim pose: right arm raised forward
+      this.player.userData.armR.rotation.x = -1.35;
+    } else {
+      detachWeapon(this.player);
+      this.player.userData.armR.rotation.x = 0;
+    }
   }
   update(dt) {
     this.cooldown = Math.max(0, this.cooldown - dt);
-    if (this.flash) {
-      this.flashT -= dt;
-      if (this.flashT <= 0) {
-        this.scene.remove(this.flash);
-        this.flash = null;
-      }
-    }
+    this.flash.update(dt);
+    this.sparks.update(dt);
+    this.smoke.update(dt);
   }
   // melee swing: hits peds within 2.2m in front
   melee(playerPos, heading, peds, onHit) {
@@ -61,7 +76,11 @@ export class Combat {
     this.cooldown = 0.28;
     this.ammo -= 1;
     this.audio.play('shot');
-    this.muzzleFlash(camera);
+    // muzzle flash at the barrel tip (player's gun, or camera fallback)
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const tip = this._tmp.copy(camera.position).addScaledVector(dir, 1.2);
+    tip.y -= 0.25;
+    this.flash.fire(tip, dir);
     this.raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const hits = this.raycaster.intersectObjects(targets, true);
     if (hits.length > 0) {
@@ -69,22 +88,13 @@ export class Combat {
       while (obj.parent && !obj.userData.isPerson && obj.parent !== this.scene) {
         obj = obj.parent;
       }
+      // impact: sparks + a wisp of smoke at the hit point
+      this.sparks.burst(hits[0].point, 14);
+      this.smoke.puff(hits[0].point, 0.35, 0xbbbbbb);
       if (onHit) onHit(obj, hits[0].point);
       return 'hit';
     }
     return 'miss';
-  }
-  muzzleFlash(camera) {
-    const flash = new THREE.Mesh(
-      new THREE.SphereGeometry(0.3, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffe9a0 })
-    );
-    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    flash.position.copy(camera.position).addScaledVector(dir, 1.2);
-    flash.position.y -= 0.25;
-    this.scene.add(flash);
-    this.flash = flash;
-    this.flashT = 0.06;
   }
 }
 
