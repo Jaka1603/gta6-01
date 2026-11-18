@@ -92,6 +92,9 @@ function printTex(kind, variant) {
 
 // A minifigure built from joint pivots: rotation.x on a limb pivot
 // swings it (walk cycle, aim poses, hands-up surrender all reuse it).
+// v5: everything above the hips lives in an `upper` group pivoted at
+// hip height, so the whole torso can LEAN (run gait) as one piece;
+// the root group itself is reserved for heading + the knock tumble.
 export function makePerson(shirt, pants, skin = 0xd9a066, opts = {}) {
   const g = new THREE.Group();
   // hard-surface plastic: low roughness, no metalness
@@ -103,11 +106,15 @@ export function makePerson(shirt, pants, skin = 0xd9a066, opts = {}) {
   const headMat = new THREE.MeshStandardMaterial({
     map: FACE_TEX, color: skin, roughness: 0.45,
   });
+  const HIP_Y = 0.78;
+  const upper = new THREE.Group();
+  upper.position.y = HIP_Y;
+  g.add(upper);
   // hip piece (the minifig "hips" block both legs hang from)
   const hip = new THREE.Mesh(hipGeo, pantsMat);
-  hip.position.y = 0.78;
+  hip.position.y = 0;
   hip.castShadow = true;
-  g.add(hip);
+  upper.add(hip);
   // limbs: pivot group at the joint, mesh hangs below it
   const limb = (geo, m, withHand) => {
     const p = new THREE.Group();
@@ -125,64 +132,122 @@ export function makePerson(shirt, pants, skin = 0xd9a066, opts = {}) {
   legL.position.set(-0.135, 0.72, 0);
   const legR = limb(legGeo, pantsMat, false);
   legR.position.set(0.135, 0.72, 0);
+  g.add(legL, legR);
   // trapezoid torso + printed-detail plate on the chest
   const torso = new THREE.Mesh(torsoGeo, shirtMat);
-  torso.position.y = 1.16;
+  torso.position.y = 1.16 - HIP_Y;
   torso.castShadow = true;
-  g.add(torso);
+  upper.add(torso);
   const plate = new THREE.Mesh(plateGeo, new THREE.MeshStandardMaterial({
     map: printTex(opts.print || 'civil', opts.printVariant || 0),
     transparent: true, roughness: 0.5,
     polygonOffset: true, polygonOffsetFactor: -1,
   }));
-  plate.position.set(0, 1.17, 0.185);
+  plate.position.set(0, 1.17 - HIP_Y, 0.185);
   plate.rotation.x = 0.1;
-  g.add(plate);
+  upper.add(plate);
   const neck = new THREE.Mesh(neckGeo, shirtMat);
-  neck.position.y = 1.475;
-  g.add(neck);
+  neck.position.y = 1.475 - HIP_Y;
+  upper.add(neck);
   // cylindrical head (printed smile faces +Z via the π yaw) + stud/hair
   const head = new THREE.Mesh(headGeo, headMat);
-  head.position.y = 1.63;
+  head.position.y = 1.63 - HIP_Y;
   head.rotation.y = Math.PI;
   head.castShadow = true;
-  g.add(head);
+  upper.add(head);
   if (opts.hair) {
     const hair = new THREE.Mesh(hairGeo, mat(opts.hairColor || 0x2a1a10, 0.5));
-    hair.position.y = 1.72;
+    hair.position.y = 1.72 - HIP_Y;
     hair.castShadow = true;
-    g.add(hair);
+    upper.add(hair);
   } else if (!opts.noStud) {
     const stud = new THREE.Mesh(studGeo, skinMat);
-    stud.position.y = 1.785;
-    g.add(stud);
+    stud.position.y = 1.785 - HIP_Y;
+    upper.add(stud);
   }
   // arms on shoulder pivots, C-hands at the bottom
   const armMat = opts.sleeveless ? skinMat : shirtMat;
   const armL = limb(armGeo, armMat, true);
-  armL.position.set(-0.345, 1.4, 0);
+  armL.position.set(-0.345, 1.4 - HIP_Y, 0);
   const armR = limb(armGeo, armMat, true);
-  armR.position.set(0.345, 1.4, 0);
-  g.add(legL, legR, armL, armR);
+  armR.position.set(0.345, 1.4 - HIP_Y, 0);
+  upper.add(armL, armR);
   g.userData = {
-    legL, legR, armL, armR,
+    legL, legR, armL, armR, upper, torso, head,
     walkPhase: Math.random() * 6,
     speed: 0, heading: 0, fleeing: false,
     isPerson: true,
     minifig: true,
-    // walk(phase) swings limbs; called by owners, not here
-    walk(phase, amp = 0.55) {
+    knock: null,          // v5: active knockdown state, if any
+    // walk(phase, amp, lean) swings limbs and leans the torso;
+    // called by owners, not here. v5 gait split (Jaka fix #6):
+    // walking = small amp, upright; running = big amp + lean.
+    walk(phase, amp = 0.55, lean = 0) {
       legL.rotation.x = Math.sin(phase) * amp;
       legR.rotation.x = Math.sin(phase + Math.PI) * amp;
       armL.rotation.x = Math.sin(phase + Math.PI) * amp * 0.7;
       armR.rotation.x = Math.sin(phase) * amp * 0.7;
+      upper.rotation.x = lean;
+      // a runner's bob is deeper and lands on the stride beat
+      g.position.y = Math.abs(Math.sin(phase)) * (0.03 + amp * 0.05);
     },
     idle() {
       legL.rotation.x *= 0.8; legR.rotation.x *= 0.8;
       armL.rotation.x *= 0.8; armR.rotation.x *= 0.8;
+      upper.rotation.x *= 0.8;
+      g.position.y *= 0.7;
     },
   };
   return g;
+}
+
+// --- v5 knockdown (Jaka fix #4): cars are SOLID to people ---
+// knockPerson launches a figure along (vx, vz): it slides with
+// friction, topples forward over ~0.18 s, lies still, then climbs
+// back up. updateKnock advances the state; it returns true while
+// the figure is down (owners skip their normal movement then).
+export function knockPerson(person, vx, vz, downTime = 1.15) {
+  const u = person.userData;
+  if (u.knock) return false;
+  const speed = Math.hypot(vx, vz);
+  u.knock = {
+    t: 0, dur: downTime + Math.min(0.5, speed * 0.03),
+    vx, vz,
+    face: Math.atan2(vx, vz),   // fall in the direction of travel
+  };
+  // sprawl: limbs flung out, frozen for the whole tumble
+  u.legL.rotation.x = -0.9; u.legR.rotation.x = 0.55;
+  u.armL.rotation.x = -2.4; u.armR.rotation.x = -1.9;
+  u.upper.rotation.x = 0;
+  person.rotation.y = u.knock.face;
+  return true;
+}
+
+export function updateKnock(person, dt) {
+  const u = person.userData;
+  const k = u.knock;
+  if (!k) return false;
+  k.t += dt;
+  // slide: exponential friction, most travel in the first half second
+  const drag = Math.exp(-3.2 * dt);
+  person.position.x += k.vx * dt;
+  person.position.z += k.vz * dt;
+  k.vx *= drag; k.vz *= drag;
+  // tumble curve: fast fall (0→1 in 0.18 s), hold, then get up
+  const FALL = 1.42; // rad — flat on the ground, face forward
+  let a;
+  if (k.t < 0.18) a = FALL * (k.t / 0.18);
+  else if (k.t > k.dur - 0.38) a = FALL * Math.max(0, (k.dur - k.t) / 0.38);
+  else a = FALL;
+  person.rotation.x = a;
+  if (k.t >= k.dur) {
+    u.knock = null;
+    person.rotation.x = 0;
+    person.position.y = 0;
+    u.idle();
+    return false;
+  }
+  return true;
 }
 
 // --- weapons held in the right hand (pistol / rifle, correct scale) ---
@@ -259,9 +324,10 @@ export function heroPerson() {
     new THREE.TorusGeometry(0.11, 0.015, 6, 14),
     new THREE.MeshStandardMaterial({ color: 0xd8a030, metalness: 0.9, roughness: 0.3 })
   );
-  chain.position.set(0, 1.42, 0.03);
+  // v5: the chain rides the upper-body rig so it follows the run lean
+  chain.position.set(0, 1.42 - 0.78, 0.03);
   chain.rotation.x = Math.PI / 2 - 0.35;
-  p.add(chain);
+  p.userData.upper.add(chain);
   p.userData.hero = true;
   return p;
 }
@@ -326,6 +392,28 @@ export class Pedestrians {
   update(dt) {
     for (const p of this.peds) {
       const u = p.userData;
+      // v5: a knocked-down pedestrian slides + tumbles first; the
+      // sidewalk-lane logic below must not teleport them back
+      if (u.knock) {
+        const wasDown = updateKnock(p, dt);
+        if (wasDown) continue;
+        // just got up: re-derive the lane from where they landed
+        const nx = nearestRoadCoord(p.position.x);
+        const nz = nearestRoadCoord(p.position.z);
+        u.vertical = Math.abs(p.position.x - nx) < Math.abs(p.position.z - nz);
+        if (u.vertical) {
+          u.roadLine = nx;
+          u.side = Math.sign(p.position.x - nx || 1) * (roadHalfAt(nx) + 1.45);
+          u.heading = this.rand() < 0.5 ? 0 : Math.PI;
+        } else {
+          u.roadLine = nz;
+          u.side = Math.sign(p.position.z - nz || 1) * (roadHalfAt(nz) + 1.45);
+          u.heading = this.rand() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
+        }
+        u.fleeing = true;
+        u.fleeTimer = 1.2;
+        u.speed = 4.2;
+      }
       if (u.fleeTimer !== undefined) {
         u.fleeTimer -= dt;
         if (u.fleeTimer <= 0) {
@@ -383,9 +471,12 @@ export class Pedestrians {
         if (p.position.x < -205) { p.position.x = -205; u.heading = Math.PI / 2; }
       }
       p.rotation.y = u.heading;
-      // walk cycle (delta-time, phase advances with speed)
-      u.walkPhase += dt * u.speed * 3.2;
-      u.walk(u.walkPhase);
+      // walk cycle (delta-time, phase advances with speed) — v5:
+      // fleeing peds get the RUN gait (wide swing + forward lean),
+      // strollers keep the relaxed upright walk, same as the player
+      const run = u.speed > 2.6;
+      u.walkPhase += dt * u.speed * (run ? 3.7 : 2.6);
+      u.walk(u.walkPhase, run ? 0.95 : 0.5, run ? 0.16 : 0.02);
     }
   }
 }

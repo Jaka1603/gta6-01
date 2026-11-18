@@ -35,6 +35,19 @@ export class HUD {
     mk('hud-bust', 'hud bust', '');
     mk('hud-zone', 'hud zone', '');
     mk('hud-center', 'hud center', '');
+    // v5 mission guide (Jaka fix #3): a live arrow + distance that
+    // always point at the current objective, SA-style
+    const guide = mk('hud-guide', 'hud guide',
+      '<span id="guide-arrow">▲</span><span id="guide-dist"></span>');
+    guide.style.display = 'none';
+    this.guideArrow = guide.querySelector('#guide-arrow');
+    this.guideDist = guide.querySelector('#guide-dist');
+    this.guideState = { angle: 0, dist: 0, visible: false };
+    // v5 amendment: contextual action prompt ("E — Masuk Mobil"),
+    // projected next to the car it refers to (see main.js)
+    const prompt = mk('hud-prompt', 'hud prompt', '');
+    prompt.style.display = 'none';
+    this.promptState = { text: '', x: 0, y: 0, visible: false };
     // minimap
     const mm = document.createElement('canvas');
     mm.id = 'minimap'; mm.width = 190; mm.height = 190;
@@ -83,6 +96,49 @@ export class HUD {
   setObjective(text) {
     this.el['hud-objective'].innerHTML = text ? '🎯 ' + text : '';
     this.el['hud-objective'].style.display = text ? 'block' : 'none';
+  }
+  // v5: angle = screen-relative bearing to the target (0 = straight
+  // ahead, + = target to the right); dist in metres. null hides it.
+  setGuide(angle, dist) {
+    const el = this.el['hud-guide'];
+    if (angle === null || angle === undefined) {
+      if (this.guideState.visible) {
+        el.style.display = 'none';
+        this.guideState.visible = false;
+      }
+      return;
+    }
+    this.guideState.angle = angle;
+    this.guideState.dist = dist;
+    this.guideState.visible = true;
+    el.style.display = 'flex';
+    this.guideArrow.style.transform = 'rotate(' + angle + 'rad)';
+    const d = Math.round(dist);
+    if (this._guideDistShown !== d) {
+      this._guideDistShown = d;
+      this.guideDist.textContent = d + ' m';
+    }
+  }
+  // v5 amendment: show/hide the projected action prompt. x/y are
+  // CSS pixels; the element is centred on x and floats above y.
+  setPrompt(text, x, y) {
+    const el = this.el['hud-prompt'];
+    if (!text) {
+      if (this.promptState.visible) {
+        el.style.display = 'none';
+        this.promptState.visible = false;
+        this.promptState.text = '';
+      }
+      return;
+    }
+    this.promptState.text = text;
+    this.promptState.x = x;
+    this.promptState.y = y;
+    this.promptState.visible = true;
+    el.style.display = 'block';
+    if (el.textContent !== text) el.textContent = text;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
   }
   setTimer(sec) {
     if (sec > 0) {

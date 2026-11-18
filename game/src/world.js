@@ -674,7 +674,10 @@ export function buildWorld(scene, rand) {
         } else {
           const x = p + hw + 1.3, z = q - hq - 1.3;
           if (furnClear(x, z)) {
-            signSpots.push({ x, z, kind: 'stop', yaw: Math.atan2(-1, 1) });
+            // v5: faces are double-sided prints, so yaw 0 (faces
+            // perpendicular to the vertical road) reads correctly
+            // for traffic approaching from either direction
+            signSpots.push({ x, z, kind: 'stop', yaw: 0 });
           }
         }
       }
@@ -745,33 +748,71 @@ export function buildWorld(scene, rand) {
     group.add(mkDots(greenDots, new THREE.MeshBasicMaterial({ color: PALETTE.signalGreen })));
     group.add(mkDots(redDots, new THREE.MeshBasicMaterial({ color: PALETTE.signalRed })));
     group.add(mkDots(darkDots, new THREE.MeshStandardMaterial({ color: 0x2c2f26, roughness: 0.6 })));
-    // stop signs: thin pole + octagon with a printed STOP face
+    // stop signs: thin pole + octagon blank + printed STOP faces.
+    // v5 (Jaka fix #1): the v3 face was a cylinder cap, whose UVs
+    // mirror the texture — his phone shot showed STOP backwards.
+    // The face is now two flat discs with hand-set planar UVs: the
+    // front disc reads correctly from +Z (u grows with +x), and the
+    // back disc is the SAME planar mapping carried through a π yaw
+    // — the yaw itself negates x, so u ends up shrinking with +x,
+    // which is exactly what a viewer standing at -Z needs to read
+    // it un-mirrored. (Flipping U as well would mirror it again —
+    // the v5 play-test asserts both slopes.)
     const stopPoleGeo = new THREE.CylinderGeometry(0.05, 0.06, SCALE.signH, 6);
     stopPoleGeo.translate(0, SCALE.signH / 2, 0);
     const stopPoles = new THREE.InstancedMesh(stopPoleGeo, sigMat, Math.max(1, stops.length));
-    const octGeo = new THREE.CylinderGeometry(0.46, 0.46, 0.05, 8);
-    octGeo.rotateX(Math.PI / 2);
-    octGeo.rotateZ(Math.PI / 8);
-    octGeo.translate(0, SCALE.signH + 0.25, 0);
-    const stopMat = new THREE.MeshStandardMaterial({
-      map: stopSignTexture(), roughness: 0.5,
+    const rimGeo = new THREE.CylinderGeometry(0.47, 0.47, 0.045, 8);
+    rimGeo.rotateX(Math.PI / 2);
+    rimGeo.rotateZ(Math.PI / 8);
+    rimGeo.translate(0, SCALE.signH + 0.25, 0);
+    const rimMat = new THREE.MeshStandardMaterial({
+      color: PALETTE.signRed, roughness: 0.5,
     });
-    const octs = new THREE.InstancedMesh(octGeo, stopMat, Math.max(1, stops.length));
+    const rims = new THREE.InstancedMesh(rimGeo, rimMat, Math.max(1, stops.length));
+    const stopTex = stopSignTexture();
+    const disc = () => {
+      const d = new THREE.CircleGeometry(0.455, 8);
+      d.rotateZ(Math.PI / 8); // flat top, matching the printed ring
+      // planar UVs recomputed from the ROTATED positions (three.js
+      // leaves UVs behind when geometry rotates, which would skew
+      // the print against the blank's outline)
+      const p = d.attributes.position, uv = d.attributes.uv;
+      for (let i = 0; i < p.count; i++) {
+        uv.setXY(i, p.getX(i) / 0.91 + 0.5, p.getY(i) / 0.91 + 0.5);
+      }
+      return d;
+    };
+    const faceF = disc();
+    faceF.translate(0, SCALE.signH + 0.25, 0.028);
+    const faceB = disc();
+    faceB.rotateY(Math.PI);
+    faceB.translate(0, SCALE.signH + 0.25, -0.028);
+    const faceGeo = mergeGeoms([faceF, faceB]);
+    const stopMat = new THREE.MeshStandardMaterial({
+      map: stopTex, roughness: 0.5,
+    });
+    const faces = new THREE.InstancedMesh(faceGeo, stopMat, Math.max(1, stops.length));
+    // exposed for the v5 play-test's mirror audit + render readback
+    worldInfo.stopFace = { geo: faceGeo, tex: stopTex };
     stops.forEach((s, si) => {
       dummy.position.set(s.x, 0, s.z);
       dummy.rotation.set(0, s.yaw, 0);
       dummy.scale.setScalar(1);
       dummy.updateMatrix();
       stopPoles.setMatrixAt(si, dummy.matrix);
-      octs.setMatrixAt(si, dummy.matrix);
+      rims.setMatrixAt(si, dummy.matrix);
+      faces.setMatrixAt(si, dummy.matrix);
     });
     stopPoles.count = stops.length;
-    octs.count = stops.length;
+    rims.count = stops.length;
+    faces.count = stops.length;
     stopPoles.instanceMatrix.needsUpdate = true;
-    octs.instanceMatrix.needsUpdate = true;
+    rims.instanceMatrix.needsUpdate = true;
+    faces.instanceMatrix.needsUpdate = true;
     stopPoles.frustumCulled = false;
-    octs.frustumCulled = false;
-    group.add(stopPoles, octs);
+    rims.frustumCulled = false;
+    faces.frustumCulled = false;
+    group.add(stopPoles, rims, faces);
   }
 
   // -- v3 BENCHES (Jaka fix #7): slatted waiting benches along

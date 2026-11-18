@@ -15,8 +15,8 @@
 const THREE = window.THREE;
 import { CFG, PALETTE, SCALE, rng, clamp, lerp, TAU } from './config.js';
 import { buildWorld, roadCoord, nearestRoadCoord, onRoad, worldInfo } from './world.js';
-import { Traffic, spawnParked, heroCar, makeCar, setBrake } from './vehicles.js';
-import { Pedestrians, heroPerson, attachWeapon } from './people.js';
+import { Traffic, spawnParked, heroCar, makeCar, setBrake, rollWheels, steerWheels, carPersonHit } from './vehicles.js';
+import { Pedestrians, heroPerson, attachWeapon, updateKnock } from './people.js';
 import { Police } from './police.js';
 import { Missions, MISSION_DEFS } from './missions.js';
 import { Combat, Health } from './combat.js';
@@ -153,8 +153,12 @@ const dog = new DogFollower(scene, peds.peds[0]);
 const cat = new CrossingCat(scene, rand);
 
 const player = heroPerson();
-player.position.set(30, 0, 30);
-player.rotation.y = Math.PI;
+// v5: Dario starts on the SIDEWALK corner by his car — v3 put him
+// in the middle of the (30,30) junction, which was harmless while
+// cars ghosted through people; with solid traffic (fix #4) he was
+// run over within seconds of spawning
+player.position.set(40.5, 0, 38.45);
+player.rotation.y = Math.PI / 2;
 scene.add(player);
 combat.setPlayer(player);
 
@@ -162,6 +166,20 @@ const car = heroCar();
 car.position.set(34, 0, 30);
 car.rotation.y = Math.PI / 2;
 scene.add(car);
+
+// v5: traffic is wired to the people it shares the street with —
+// pedestrians get knocked down (handled inside Traffic), and a hit
+// on Dario costs health + a beat of lost control (knock state on
+// the player figure, driven by updatePlayer).
+traffic.peds = peds.peds;
+traffic.playerRef = player;
+traffic.onPlayerHit = (hitCar, speed, knocked) => {
+  if (!knocked) return; // crawling push-aside already moved him
+  audio.play('punch');
+  if (health.damage(7)) { showEnd('wasted'); return; }
+  hud.center('KETABRAK!', 'Awas lalu lintas, Dario.');
+  syncHUD();
+};
 
 // chase target for mission 2 (blue sedan)
 const chaseTarget = makeCar(0, 0x2e86c1);
@@ -180,14 +198,20 @@ const state = {
   cash: CFG.startCash,
   inCar: false,
   carSpeed: 0,
-  heading: Math.PI,     // player facing (on foot)
+  heading: Math.PI / 2, // player facing (on foot) — +X at spawn
   keys: {},
   missionIndex: 0,
   missionsDone: 0,
   time: 0,
   clockMin: 1110,       // 18:30 — golden hour, fixed for the look
-  camYaw: 0,
+  camYaw: -Math.PI / 2, // settled behind the spawn heading
   camOffset: 0,         // v4: touch camera-drag orbit offset (radians)
+  camOffsetTarget: 0,   // v5: drags aim here; camOffset eases to it
+  stickVec: { x: 0, y: 0, mag: 0 }, // v5: analog stick (touch)
+  sprinting: false,     // v5: true while the run gait is engaged
+  transition: null,     // v5 amendment: enter/exit car sequence
+  exitPending: false,   // v5 amendment: ACT at speed -> brake first
+  nearCar: null,        // v5 amendment: car the enter prompt offers
   shotReady: false,
   exhaustT: 0,
   skidT: 0,
@@ -295,7 +319,12 @@ function startGame(fromSave) {
     state.cash = CFG.startCash;
     state.missionsDone = 0;
     health.hp = CFG.playerHealth;
-    player.position.set(30, 0, 30);
+    // sidewalk spawn (see build note), facing +X along the kerb,
+    // camera settled behind him: W walks the pavement, not a lane
+    player.position.set(40.5, 0, 38.45);
+    state.heading = Math.PI / 2;
+    state.camYaw = -Math.PI / 2;
+    player.rotation.y = state.heading;
     police.clear();
     missions.reset();
     missions.start(0);
@@ -308,7 +337,10 @@ titleContinue.addEventListener('click', () => startGame(true));
 document.getElementById('btn-retry').addEventListener('click', () => {
   health.hp = CFG.playerHealth;
   police.clear();
-  player.position.set(30, 0, 30);
+  player.position.set(40.5, 0, 38.45);
+  state.heading = Math.PI / 2;
+  state.camYaw = -Math.PI / 2;
+  player.rotation.y = state.heading;
   endEl.classList.add('hidden');
   state.mode = 'playing';
   document.body.classList.add('in-game');
@@ -419,13 +451,36 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyR' && state.mode === 'playing') reloadPistol();
 });
 addEventListener('keyup', (e) => { state.keys[e.code] = false; });
+// v5 (fix #7): a mouse press on the canvas is a camera DRAG until
+// it proves to be a click — drags orbit the camera (into the same
+// damped camOffsetTarget the touch drag uses), a press released
+// within a few px still fires, so click-to-shoot is unchanged.
+let mouseDrag = null;
 addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   // taps on the touch UI / menus must never fire the pistol, and the
   // compatibility mouse event after a touch tap must not double-fire
   if (e.target && e.target.closest && e.target.closest('#touch-controls, .overlay')) return;
   if (performance.now() - touchTapAt < 700) return;
+  if (e.target === canvas && state.mode === 'playing') {
+    mouseDrag = { sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY, moved: 0 };
+    return;
+  }
   playerShoot();
+});
+addEventListener('mousemove', (e) => {
+  if (!mouseDrag) return;
+  state.camOffsetTarget += (e.clientX - mouseDrag.x) * 0.0052;
+  mouseDrag.x = e.clientX;
+  mouseDrag.y = e.clientY;
+  mouseDrag.moved = Math.max(mouseDrag.moved,
+    Math.abs(e.clientX - mouseDrag.sx) + Math.abs(e.clientY - mouseDrag.sy));
+});
+addEventListener('mouseup', () => {
+  if (!mouseDrag) return;
+  const wasClick = mouseDrag.moved < 6;
+  mouseDrag = null;
+  if (wasClick) playerShoot();
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -434,13 +489,20 @@ addEventListener('resize', () => {
 });
 
 // ---------- touch controls ----------
-// The stick and buttons feed the SAME state.keys the keyboard uses,
-// so on-foot walking, driving, braking and sprinting all reuse the
-// tested update code — touch only translates fingers into keys and
-// taps into the existing action functions.
+// v5 (Jaka's amendment — the standard mobile GTA-clone scheme):
+// a FLOATING analog stick: the base appears where the left thumb
+// lands, the knob follows it clamped to the base, and deflection
+// drives movement speed PROPORTIONALLY through state.stickVec
+// (small push = stroll, full push = run). The stick still derives
+// the digital WASD keys for anything that reads them. Buttons feed
+// the same action functions as the keyboard. Dragging the right
+// half of the screen orbits the camera into state.camOffsetTarget,
+// which updateCamera damps toward — no jitter, no snapping.
+const STICK_DEAD = 0.12;   // dead zone, as a fraction of full travel
+const STICK_TRAVEL = 70;   // px of thumb travel = full deflection
 let touchTapAt = 0;
 let stickPointer = null;
-let stickSprint = false;
+let stickOrigin = { x: 0, y: 0 };
 let runHeld = false;
 const stickEl = document.getElementById('stick');
 const knobEl = document.getElementById('stick-knob');
@@ -454,7 +516,7 @@ function syncHoldKeys() {
     state.keys['ShiftLeft'] = false;
     state.keys['ShiftRight'] = false;
   } else {
-    state.keys['ShiftLeft'] = runHeld || stickSprint;
+    state.keys['ShiftLeft'] = runHeld;
     state.keys['Space'] = false;
   }
 }
@@ -465,45 +527,58 @@ function refreshTouchUI() {
   const atk = state.inCar ? '···' : (combat.weapon === 'pistol' ? 'FIRE' : 'ATK');
   if (atkBtn.textContent !== atk) atkBtn.textContent = atk;
 }
-function stickMove(e) {
-  const r = stickEl.getBoundingClientRect();
-  let dx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
-  let dy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
-  const len = Math.hypot(dx, dy);
-  if (len > 1) { dx /= len; dy /= len; }
-  knobEl.style.transform =
-    'translate(-50%, -50%) translate(' + (dx * 36) + 'px, ' + (dy * 36) + 'px)';
-  const dead = 0.24;
-  setKey('KeyW', dy < -dead);
-  setKey('KeyS', dy > dead);
-  setKey('KeyA', dx < -dead);
-  setKey('KeyD', dx > dead);
-  stickSprint = Math.min(1, len) > 0.93;
-  syncHoldKeys();
+// the base floats to the thumb: it recentres on the landing point
+// (clamped so the whole base stays on screen), then the knob is a
+// pure function of thumb displacement from that origin.
+function stickStart(e) {
+  stickPointer = e.pointerId;
+  const half = STICK_TRAVEL;
+  stickOrigin.x = clamp(e.clientX, half, innerWidth - half);
+  stickOrigin.y = clamp(e.clientY, half, innerHeight - half);
+  stickEl.style.left = (stickOrigin.x - half) + 'px';
+  stickEl.style.top = (stickOrigin.y - half) + 'px';
+  stickEl.style.bottom = 'auto';
+  knobEl.style.transition = 'none';
+  stickMove(e);
 }
-function stickEnd() {
+function stickMove(e) {
+  let dx = (e.clientX - stickOrigin.x) / STICK_TRAVEL;
+  let dy = (e.clientY - stickOrigin.y) / STICK_TRAVEL;
+  const len = Math.hypot(dx, dy);
+  const mag = Math.min(1, len);
+  if (len > 1) { dx /= len; dy /= len; }
+  // analog vector: x = right, y = forward (screen-up), mag 0..1
+  state.stickVec.x = dx;
+  state.stickVec.y = -dy;
+  state.stickVec.mag = mag;
+  // knob follows the thumb, clamped so it never leaves the base
+  knobEl.style.transform =
+    'translate(-50%, -50%) translate(' + (dx * 39) + 'px, ' + (dy * 39) + 'px)';
+  // derived digital keys (kept for readers/tests of state.keys)
+  setKey('KeyW', dy < -STICK_DEAD);
+  setKey('KeyS', dy > STICK_DEAD);
+  setKey('KeyA', dx < -STICK_DEAD);
+  setKey('KeyD', dx > STICK_DEAD);
+}
+function stickEnd(e) {
+  if (e && e.pointerId !== undefined && e.pointerId !== stickPointer) return;
   stickPointer = null;
+  // release: movement stops THIS frame, knob springs home
+  state.stickVec.x = 0;
+  state.stickVec.y = 0;
+  state.stickVec.mag = 0;
+  knobEl.style.transition = 'transform .15s ease-out';
   knobEl.style.transform = 'translate(-50%, -50%)';
   setKey('KeyW', false);
   setKey('KeyS', false);
   setKey('KeyA', false);
   setKey('KeyD', false);
-  stickSprint = false;
-  syncHoldKeys();
 }
-stickEl.addEventListener('pointerdown', (e) => {
-  touchTapAt = performance.now();
-  stickPointer = e.pointerId;
-  try { stickEl.setPointerCapture(e.pointerId); } catch {}
-  audio.ensure();
-  stickMove(e);
-  e.preventDefault();
-});
-stickEl.addEventListener('pointermove', (e) => {
+addEventListener('pointermove', (e) => {
   if (e.pointerId === stickPointer) stickMove(e);
 });
-stickEl.addEventListener('pointerup', stickEnd);
-stickEl.addEventListener('pointercancel', stickEnd);
+addEventListener('pointerup', stickEnd);
+addEventListener('pointercancel', stickEnd);
 
 function bindTap(id, on, off) {
   const el = document.getElementById(id);
@@ -547,37 +622,39 @@ bindTap('btn-full', () => {
     }
   } catch {}
 });
-// camera drag (v4, merged): a touch that starts on open canvas on
-// the right half of the screen orbits the follow camera — the drag
-// accumulates into state.camOffset, which updateCamera folds into
-// its target yaw, so the view swings without fighting the follow
-// logic. Touches on the stick / buttons never reach the canvas, and
-// mouse play is untouched (touch pointers only).
+// v5 touch dispatcher (the amendment's scheme): a touch on open
+// screen is split by half — LEFT summons the floating stick under
+// the thumb, RIGHT drags the camera. Drags accumulate into
+// state.camOffsetTarget and updateCamera damps camOffset toward
+// it, so the view swings with a little inertia and never snaps.
+// Buttons keep their own bindTap handlers and are skipped here;
+// the stick element sits in the left zone, so a touch starting on
+// it is classified as a stick touch by position like any other.
 let camPointer = null;
 let camLastX = 0;
 addEventListener('pointerdown', (e) => {
-  if (e.pointerType !== 'touch') return;
+  if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+  touchTapAt = performance.now();
+  document.body.classList.add('touch');
   if (state.mode !== 'playing') return;
-  if (e.target !== canvas) return;
-  if (e.clientX < innerWidth * 0.45) return;
-  camPointer = e.pointerId;
-  camLastX = e.clientX;
+  const t = e.target;
+  if (t && t.closest && t.closest('#touch-actions, #touch-top, .overlay')) return;
+  audio.ensure();
+  if (e.clientX < innerWidth * 0.5) {
+    if (stickPointer === null) stickStart(e);
+  } else if (camPointer === null) {
+    camPointer = e.pointerId;
+    camLastX = e.clientX;
+  }
 });
 addEventListener('pointermove', (e) => {
   if (e.pointerId !== camPointer) return;
-  state.camOffset += (e.clientX - camLastX) * 0.0055;
+  state.camOffsetTarget += (e.clientX - camLastX) * 0.0055;
   camLastX = e.clientX;
 });
 const camDragEnd = (e) => { if (e.pointerId === camPointer) camPointer = null; };
 addEventListener('pointerup', camDragEnd);
 addEventListener('pointercancel', camDragEnd);
-// a real touch on a device that did not advertise one still gets UI
-addEventListener('pointerdown', (e) => {
-  if (e.pointerType === 'touch') {
-    document.body.classList.add('touch');
-    touchTapAt = performance.now();
-  }
-}, { passive: true });
 // never leave a virtual key stuck when the tab loses focus
 addEventListener('blur', () => {
   stickEnd();
@@ -585,53 +662,71 @@ addEventListener('blur', () => {
   syncHoldKeys();
 });
 
-// ---------- enter / exit car ----------
+// ---------- enter / exit car (v5 amendment: GTA-style flow) ------
+// ACT near a car starts a short sequence instead of a teleport:
+// Dario walks to the DRIVER-side door, the hinged door swings
+// open, he gets in, the door closes, and the camera glides to the
+// chase position. state.inCar flips immediately (the sequence is
+// the visual), input is locked while it plays, and the v3 body-
+// swap + stolen-car restore semantics are preserved exactly —
+// the swap just happens mid-sequence now. Traffic cars can be
+// carjacked the same way (wanted +1, restored to traffic on exit).
 function nearestCar(maxD) {
   let best = null, bestD = maxD;
-  const all = [car].concat(parked);
+  const all = [car].concat(parked, traffic.cars);
   for (const c of all) {
     if (c.userData.parked && c.userData.stolen) continue;
+    if (!c.visible) continue;
     const d = Math.hypot(c.position.x - player.position.x, c.position.z - player.position.z);
     if (d < bestD) { best = c; bestD = d; }
   }
   return best;
 }
-function tryEnterExitCar() {
-  if (state.inCar) {
-    // exit
-    state.inCar = false;
-    const side = new THREE.Vector3(1, 0, 0).applyEuler(car.rotation);
-    player.position.copy(car.position).addScaledVector(side, 2.5);
-    player.visible = true;
-    state.heading = car.rotation.y;
-    // v3 audit: put the stolen car back where it was taken from and
-    // give the convertible its own top speed back (v2 deleted the
-    // stolen car from the world and kept whatever speed was last set)
-    if (state.stolenCar) {
-      const c = state.stolenCar;
-      c.visible = true;
-      c.userData.parked = true;
-      c.userData.stolen = false;
-      state.stolenCar = null;
-      car.userData.maxSpeed = state.heroMax || CFG.carMax;
-    }
-    hud.center('KELUAR MOBIL', '');
-    return;
-  }
-  const c = nearestCar(4);
-  if (!c) return;
+function setDoor(carObj, amt) {
+  const d = carObj.userData.door;
+  if (d) d.rotation.y = amt * 1.15;
+}
+function doorOpenAmt(carObj) {
+  const d = carObj.userData.door;
+  return d ? d.rotation.y / 1.15 : 0;
+}
+// where Dario stands to use the driver door (live — a jacked
+// traffic car may still be rolling to a stop)
+const _doorV = new THREE.Vector3();
+function doorAnchor(c) {
+  const s = c.userData.style || { w: 1.85, l: 4.4 };
+  const hingeZ = c.userData.door ? c.userData.door.position.z : s.l * 0.1;
+  _doorV.set(-(s.w / 2) - 0.62, 0, hingeZ - 0.35);
+  return _doorV.applyEuler(c.rotation).add(c.position);
+}
+function startEnter(c) {
+  state.inCar = true;            // state now; the sequence is visual
+  state.carSpeed = 0;
+  state.transition = {
+    kind: 'enter', target: c, t: 0, dur: 0.9, swapped: false,
+    from: player.position.clone(), focus: c.position,
+  };
+  hud.setPrompt(null);
+}
+function doEnterSwap(tr) {
+  const c = tr.target;
   if (c.userData.parked) {
     c.userData.parked = false;
     c.userData.stolen = true;
     police.addWanted(1);
     hud.phone('MAMA ROSA', 'Mobil curian? Hati-hati, Dario. Polisi mengawasi.');
     peds.fleeFrom(player.position.x, player.position.z, 10);
+  } else if (traffic.cars.includes(c)) {
+    // carjacking: pull the car out of traffic until Dario gets out
+    traffic.cars.splice(traffic.cars.indexOf(c), 1);
+    c.userData.jacked = true;
+    police.addWanted(1);
+    peds.fleeFrom(player.position.x, player.position.z, 10);
   }
-  state.inCar = true;
-  state.carSpeed = 0;
   player.visible = false;
-  // swap active car if it is a parked one — and remember it, plus the
-  // hero's own top speed, so the exit can restore both (v3 audit)
+  // swap active car if it is a parked/jacked one — and remember it,
+  // plus the hero's own top speed, so the exit can restore both
+  // (v3 audit semantics, unchanged)
   if (c !== car) {
     car.position.copy(c.position);
     car.rotation.copy(c.rotation);
@@ -639,11 +734,139 @@ function tryEnterExitCar() {
     state.stolenCar = c;
     state.heroMax = car.userData.maxSpeed;
     car.userData.maxSpeed = c.userData.maxSpeed || CFG.carMax;
+    // the hero's door takes over the swing, mid-open
+    setDoor(car, doorOpenAmt(c));
+    setDoor(c, 0);
   }
+  tr.doorFrom = doorOpenAmt(car);
   audio.play('chime');
   hud.center('MASUK MOBIL', IS_TOUCH
     ? 'Stick mengemudi · ACT keluar · BRK rem'
     : 'WASD mengemudi · E keluar · Spasi rem');
+}
+function startExit() {
+  state.inCar = false;
+  state.exitPending = false;
+  // step out at the DRIVER side, where the door is
+  const side = new THREE.Vector3(-1, 0, 0).applyEuler(car.rotation);
+  player.position.copy(car.position).addScaledVector(side, 2.3);
+  player.visible = true;
+  state.heading = car.rotation.y;
+  player.rotation.y = state.heading;
+  // v3 audit: put the stolen car back where it was taken from and
+  // give the convertible its own top speed back (v2 deleted the
+  // stolen car from the world and kept whatever speed was last set)
+  if (state.stolenCar) {
+    const c = state.stolenCar;
+    c.visible = true;
+    if (c.userData.jacked) {
+      // a jacked traffic car rejoins traffic and drives off
+      c.userData.jacked = false;
+      c.userData.speed = c.userData.maxSpeed;
+      traffic.cars.push(c);
+    } else {
+      c.userData.parked = true;
+      c.userData.stolen = false;
+    }
+    state.stolenCar = null;
+    car.userData.maxSpeed = state.heroMax || CFG.carMax;
+  }
+  state.transition = {
+    kind: 'exit', target: car, t: 0, dur: 0.7, swapped: true,
+    from: player.position.clone(), focus: car.position,
+  };
+  hud.center('KELUAR MOBIL', '');
+}
+function tryEnterExitCar() {
+  if (state.transition) {
+    // mashing ACT during the entry queues the exit — the toggle
+    // must never feel like the button was swallowed
+    if (state.transition.kind === 'enter') state.transition.exitQueued = true;
+    return;
+  }
+  if (state.inCar) {
+    // at speed, ACT stands on the brakes first (never an eject)
+    if (Math.abs(state.carSpeed) > 4) {
+      state.exitPending = true;
+      hud.center('MENGEREM…', 'Keluar setelah mobil berhenti');
+      return;
+    }
+    startExit();
+    return;
+  }
+  const c = nearestCar(4.5);
+  if (c) startEnter(c);
+}
+// advance the enter/exit sequence; runs instead of updatePlayer /
+// updateCar while state.transition is set
+function advanceTransition(dt) {
+  const tr = state.transition;
+  tr.t += dt;
+  const u = player.userData;
+  if (tr.kind === 'enter') {
+    const c = tr.target;
+    if (!tr.swapped) {
+      // walk to the driver door (live anchor), door swings open
+      const anchor = doorAnchor(c);
+      player.position.lerp(anchor, Math.min(1, dt * 9));
+      player.rotation.y = Math.atan2(
+        c.position.x - player.position.x, c.position.z - player.position.z);
+      u.walkPhase += dt * 10;
+      u.walk(u.walkPhase, 0.62, 0.04);
+      const k = clamp((tr.t - 0.05) / 0.3, 0, 1);
+      setDoor(c, k * k * (3 - 2 * k));
+      tr.focus = c.position;
+      if (tr.t >= 0.38) { doEnterSwap(tr); tr.swapped = true; }
+    } else {
+      // seated (hidden); the door swings shut behind him
+      player.position.copy(car.position);
+      const k = clamp((tr.t - 0.5) / 0.3, 0, 1);
+      setDoor(car, (tr.doorFrom || 0.9) * (1 - k * k * (3 - 2 * k)));
+      tr.focus = car.position;
+      if (tr.t >= tr.dur) {
+        setDoor(car, 0);
+        state.transition = null;
+        if (tr.exitQueued) startExit();
+      }
+    }
+  } else {
+    // exit: door opens, Dario is already stepping out, door closes
+    const open = tr.t < 0.3
+      ? clamp(tr.t / 0.25, 0, 1)
+      : 1 - clamp((tr.t - 0.42) / 0.25, 0, 1);
+    setDoor(car, open * open * (3 - 2 * open));
+    u.idle();
+    tr.focus = car.position;
+    if (tr.t >= tr.dur) { setDoor(car, 0); state.transition = null; }
+  }
+  state.footSpeed = 0;
+}
+// the enter prompt: projected next to the car on desktop ("E —
+// Masuk Mobil"), and on touch the ACT button glows as well
+const _promptV = new THREE.Vector3();
+function updateCarPrompt() {
+  const actBtn = document.getElementById('btn-act');
+  if (state.inCar || state.transition || state.mode !== 'playing') {
+    state.nearCar = null;
+    hud.setPrompt(null);
+    if (actBtn) actBtn.classList.remove('glow');
+    return;
+  }
+  const c = nearestCar(4.5);
+  state.nearCar = c;
+  if (!c) {
+    hud.setPrompt(null);
+    if (actBtn) actBtn.classList.remove('glow');
+    return;
+  }
+  _promptV.set(c.position.x, 2.7, c.position.z).project(camera);
+  if (_promptV.z > 1) { hud.setPrompt(null); return; }
+  hud.setPrompt(
+    IS_TOUCH ? 'MASUK MOBIL ▸ ACT' : 'E — MASUK MOBIL',
+    (_promptV.x * 0.5 + 0.5) * innerWidth,
+    (-_promptV.y * 0.5 + 0.5) * innerHeight
+  );
+  if (actBtn && IS_TOUCH) actBtn.classList.add('glow');
 }
 
 // ---------- HUD sync ----------
@@ -680,27 +903,67 @@ let hudT = 0;
 let frameNo = 0;
 
 function updatePlayer(dt) {
-  const k = state.keys;
-  const run = k['ShiftLeft'] || k['ShiftRight'];
-  const speed = run ? CFG.playerRun : CFG.playerWalk;
-  let mx = 0, mz = 0;
-  if (k['KeyW'] || k['ArrowUp']) mz += 1;
-  if (k['KeyS'] || k['ArrowDown']) mz -= 1;
-  if (k['KeyA'] || k['ArrowLeft']) mx -= 1;
-  if (k['KeyD'] || k['ArrowRight']) mx += 1;
   const u = player.userData;
-  if (mx || mz) {
-    const len = Math.hypot(mx, mz);
-    const ang = Math.atan2(mx / len, mz / len) + state.camYaw;
-    state.heading = ang;
+  // v5: knocked down by a car — slide, tumble, get up; no control
+  // until people.js clears the knock state
+  if (u.knock) {
+    updateKnock(player, dt);
+    state.footSpeed = 0;
+    state.sprinting = false;
+    if (!u.knock) state.heading = player.rotation.y;
+    collideBuildings(player.position, 0.45);
+    return;
+  }
+  const k = state.keys;
+  const runKey = k['ShiftLeft'] || k['ShiftRight'];
+  // v5 input (amendment): the analog stick's speed is PROPORTIONAL
+  // to deflection past the dead zone — a small push strolls, a full
+  // push runs; the RUN button forces full run. The keyboard keeps
+  // its digital walk/run split.
+  let mx = 0, mz = 0, speed = 0;
+  const sv = state.stickVec;
+  if (sv.mag > 0.001) {
+    mx = sv.x; mz = sv.y;
+    const t = clamp((sv.mag - STICK_DEAD) / (1 - STICK_DEAD), 0, 1);
+    speed = runKey ? CFG.playerRun : CFG.playerRun * t;
+  } else {
+    if (k['KeyW'] || k['ArrowUp']) mz += 1;
+    if (k['KeyS'] || k['ArrowDown']) mz -= 1;
+    if (k['KeyA'] || k['ArrowLeft']) mx -= 1;
+    if (k['KeyD'] || k['ArrowRight']) mx += 1;
+    speed = runKey ? CFG.playerRun : CFG.playerWalk;
+  }
+  if ((mx || mz) && speed > 0.01) {
+    const len = Math.hypot(mx, mz) || 1;
+    // input is relative to the camera's LOOK direction: the camera
+    // sits at bearing camYaw from the player and looks back, so it
+    // faces camYaw + π. (v3/v4 omitted the π — heading chased
+    // camYaw while camYaw chased heading + π, and the pair rotated
+    // forever: holding W ran Dario in a circle. With the π the
+    // fixed point is exact: W runs straight away from camera.)
+    const wantAng = Math.atan2(mx / len, mz / len) + state.camYaw + Math.PI;
+    // v5 (amendment): the turn is RATE-LIMITED — Dario swings
+    // around smoothly toward the input direction (relative to the
+    // camera) instead of snapping to it
+    let dh = wantAng - state.heading;
+    while (dh > Math.PI) dh -= TAU;
+    while (dh < -Math.PI) dh += TAU;
+    state.heading += clamp(dh, -10.5 * dt, 10.5 * dt);
+    const ang = state.heading;
     state.footSpeed = speed;
+    // v5 gait (fix #6): the blend factor sf morphs the ANIMATION
+    // with speed — relaxed upright walk at sf 0, wide-swinging
+    // forward-leaning run at sf 1 — and the legs turn over faster
+    const sf = clamp((speed - CFG.playerWalk) / (CFG.playerRun - CFG.playerWalk), 0, 1);
+    state.sprinting = sf > 0.55;
     player.position.x += Math.sin(ang) * speed * dt;
     player.position.z += Math.cos(ang) * speed * dt;
     player.position.x = clamp(player.position.x, -208, 208);
     player.position.z = clamp(player.position.z, -208, 208);
     player.rotation.y = ang;
-    u.walkPhase += dt * speed * 2.4;
-    u.walk(u.walkPhase);
+    const rate = 2.3 + 1.4 * sf;
+    u.walkPhase += dt * speed * rate;
+    u.walk(u.walkPhase, 0.5 + 0.48 * sf, 0.02 + 0.15 * sf);
     // bump peds aside
     for (const p of peds.peds) {
       const d = Math.hypot(p.position.x - player.position.x, p.position.z - player.position.z);
@@ -708,6 +971,7 @@ function updatePlayer(dt) {
     }
   } else {
     state.footSpeed = 0;
+    state.sprinting = false;
     u.idle();
   }
   // v3: buildings are solid for the player too (v2 walked through them)
@@ -719,11 +983,29 @@ function updatePlayer(dt) {
 function updateCar(dt) {
   const k = state.keys;
   const u = car.userData;
+  // v5 (amendment): the analog stick drives too — up/down is
+  // proportional throttle / brake-reverse, left/right steers.
+  // The keyboard keeps its digital inputs when the stick is idle.
+  const sv = state.stickVec;
+  const stickDriving = sv.mag > STICK_DEAD;
   let throttle = 0;
-  if (k['KeyW'] || k['ArrowUp']) throttle += 1;
-  if (k['KeyS'] || k['ArrowDown']) throttle -= 0.7;
+  if (stickDriving) throttle = sv.y;
+  else {
+    if (k['KeyW'] || k['ArrowUp']) throttle += 1;
+    if (k['KeyS'] || k['ArrowDown']) throttle -= 0.7;
+  }
   const braking = !!k['Space'];
   if (braking) throttle = -1.4;
+  // v5 amendment: ACT at speed does not eject — it stands on the
+  // brakes, and the exit sequence starts once nearly stopped
+  if (state.exitPending) {
+    throttle = -2.2; // emergency stop: stood-on brakes, no coasting
+    if (Math.abs(state.carSpeed) <= 4) {
+      state.exitPending = false;
+      startExit();
+      return;
+    }
+  }
   state.carSpeed += throttle * CFG.carAccel * dt;
   state.carSpeed -= state.carSpeed * 0.6 * dt; // drag
   state.carSpeed = clamp(state.carSpeed, -10, u.maxSpeed);
@@ -735,8 +1017,12 @@ function updateCar(dt) {
   }
   state.skidT -= dt;
   let steer = 0;
-  if (k['KeyA'] || k['ArrowLeft']) steer += 1;
-  if (k['KeyD'] || k['ArrowRight']) steer -= 1;
+  if (stickDriving) steer = -sv.x;
+  else {
+    if (k['KeyA'] || k['ArrowLeft']) steer += 1;
+    if (k['KeyD'] || k['ArrowRight']) steer -= 1;
+  }
+  if (state.exitPending) steer = 0;
   const spd = state.carSpeed;
   if (Math.abs(spd) > 0.5) {
     car.rotation.y += steer * CFG.carTurn * dt * clamp(Math.abs(spd) / 12, 0.3, 1) * Math.sign(spd);
@@ -745,6 +1031,9 @@ function updateCar(dt) {
   car.position.addScaledVector(fwd, spd * dt);
   car.position.x = clamp(car.position.x, -208, 208);
   car.position.z = clamp(car.position.z, -208, 208);
+  // v5: the wheels finally turn — spin with travel, fronts steer
+  rollWheels(car, spd * dt);
+  steerWheels(car, steer * 0.45);
   // v3: buildings are solid — hitting one scrubs speed (v2 drove
   // straight through every building in the city)
   if (collideBuildings(car.position, 2.3) > 0) state.carSpeed *= 0.55;
@@ -772,13 +1061,18 @@ function updateCar(dt) {
     tip.y = 0.35;
     combat.smoke.puff(tip, 0.25, 0x8a8a8a);
   }
-  // hit peds -> wanted + flee
+  // v5: hit peds -> they go DOWN (solid bodies, fix #4), the car
+  // sheds speed, witnesses flee, wanted rises (kept from v3)
   for (const p of peds.peds) {
-    const d = Math.hypot(p.position.x - car.position.x, p.position.z - car.position.z);
-    if (d < 1.6 && Math.abs(spd) > 2) {
-      peds.fleeFrom(car.position.x, car.position.z, 15);
+    const hit = carPersonHit(car, p, Math.abs(spd));
+    if (!hit) continue;
+    if (hit.knocked) {
       police.addWanted(1);
-      state.carSpeed *= 0.6;
+      peds.fleeFrom(car.position.x, car.position.z, 15);
+      state.carSpeed *= 0.55;
+      audio.play('punch');
+    } else if (Math.abs(spd) > 0.5) {
+      state.carSpeed *= 0.85;
     }
   }
   // ram chase target (mission 2)
@@ -817,6 +1111,9 @@ function updateChaseTarget(dt) {
   u.speed = lerp(u.speed, u.maxSpeed, dt);
   const fwd = new THREE.Vector3(0, 0, 1).applyEuler(chaseTarget.rotation);
   chaseTarget.position.addScaledVector(fwd, u.speed * dt);
+  rollWheels(chaseTarget, u.speed * dt);
+  // v5: the fleeing driver knocks people down too — nobody ghosts
+  for (const p of peds.peds) carPersonHit(chaseTarget, p, Math.abs(u.speed));
   chaseTarget.position.x = clamp(chaseTarget.position.x, -205, 205);
   chaseTarget.position.z = clamp(chaseTarget.position.z, -205, 205);
   // v3: the chase car respects buildings too (it fled through them)
@@ -827,32 +1124,65 @@ function updateChaseTarget(dt) {
 const camTarget = new THREE.Vector3();
 let shotCamPos = null;
 let shotCamTarget = null;
+const _camV = new THREE.Vector3();
 function updateCamera(dt) {
-  const focus = state.inCar ? car.position : player.position;
   // staged shots: snap to the composed camera, no drift
   if (SHOT && shotCamPos) {
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
     return;
   }
+  // v5 (fix #7): the drag offset EASES toward its target — the
+  // approach is exponential, so it is monotonic with no overshoot
+  // or jitter — and while moving (and not dragging) it recentres
+  // gently behind the character/car on its own
+  const dragging = camPointer !== null || mouseDrag !== null;
+  const moving = state.inCar ? Math.abs(state.carSpeed) > 3 : state.footSpeed > 0.5;
+  if (moving && !dragging && !state.transition) {
+    state.camOffsetTarget *= Math.exp(-0.5 * dt);
+    if (Math.abs(state.camOffsetTarget) < 0.002) state.camOffsetTarget = 0;
+  }
+  state.camOffset += (state.camOffsetTarget - state.camOffset) * (1 - Math.exp(-9 * dt));
+  const dist = state.inCar ? 11 : 6.5;
+  const height = state.inCar ? 4.5 : 3.0;
+  if (state.transition) {
+    // enter/exit sequence: glide around the car being used, keep
+    // the current yaw (no snap), pull to chase distance on entry
+    const f = state.transition.focus;
+    _camV.set(f.x + Math.sin(state.camYaw) * dist, height, f.z + Math.cos(state.camYaw) * dist);
+    camera.position.lerp(_camV, 1 - Math.exp(-5 * dt));
+    collideBuildings(camera.position, 0.7);
+    camTarget.lerp(_camV.set(f.x, f.y + 1.6, f.z), 1 - Math.exp(-7 * dt));
+    camera.lookAt(camTarget);
+    return;
+  }
+  const focus = state.inCar ? car.position : player.position;
   const heading = state.inCar ? car.rotation.y : state.heading;
-  // camera yaw follows behind the focus
+  // camera yaw follows behind the focus (frame-rate independent
+  // damping: the error shrinks smoothly every frame, never snaps)
   const wantYaw = heading + Math.PI + state.camOffset;
   let dy = wantYaw - state.camYaw;
   while (dy > Math.PI) dy -= TAU;
   while (dy < -Math.PI) dy += TAU;
-  state.camYaw += dy * Math.min(1, dt * 3);
-  const dist = state.inCar ? 11 : 6.5;
-  const height = state.inCar ? 4.5 : 3.0;
+  state.camYaw += dy * (1 - Math.exp(-4.2 * dt));
   const cx = focus.x + Math.sin(state.camYaw) * dist;
   const cz = focus.z + Math.cos(state.camYaw) * dist;
-  camera.position.lerp(new THREE.Vector3(cx, height, cz), Math.min(1, dt * 6));
+  camera.position.lerp(_camV.set(cx, height, cz), 1 - Math.exp(-6 * dt));
   // v3 audit: keep the chase camera out of buildings (it used to
   // clip inside facades whenever the player backed against a wall)
   collideBuildings(camera.position, 0.7);
   const lookY = focus.y + 1.6;
-  camTarget.lerp(new THREE.Vector3(focus.x, lookY, focus.z), Math.min(1, dt * 8));
+  camTarget.lerp(_camV.set(focus.x, lookY, focus.z), 1 - Math.exp(-8 * dt));
   camera.lookAt(camTarget);
+  // v5 (fix #6): sprinting widens the FOV a touch — speed you can
+  // feel; driving already had its own smaller kick
+  const targetFov = 62 + (state.inCar
+    ? clamp(Math.abs(state.carSpeed) / CFG.carMax, 0, 1) * 5
+    : (state.sprinting ? 7 : 0));
+  if (Math.abs(camera.fov - targetFov) > 0.05) {
+    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 5);
+    camera.updateProjectionMatrix();
+  }
 }
 
 // ---------- busted / wasted ----------
@@ -1052,6 +1382,41 @@ function applyShot() {
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
     state.camYaw = car.rotation.y + Math.PI;
+  } else if (SHOT === 'sign') {
+    // v5: STOP sign close-up — Dario reads the (now un-mirrored)
+    // face from the approach side, mission guide live in the HUD
+    const spot = worldInfo.signs.find((s) => s.kind === 'stop');
+    state.inCar = false;
+    missions.start(0);
+    state.cash = 520;
+    state.clockMin = 1135; // 18:55
+    player.position.set(spot.x + 0.4, 0, spot.z + 3.6);
+    state.heading = Math.PI;
+    player.rotation.y = Math.PI;
+    state.camYaw = 0;
+    preroll(2);
+    shotCamPos = new THREE.Vector3(spot.x + 1.1, 2.3, spot.z + 5.2);
+    shotCamTarget = new THREE.Vector3(spot.x, 2.55, spot.z);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'car') {
+    // v5: the rebuilt hero car — three-quarter view from the
+    // driver side, door swung open (player hidden: he stood
+    // between the camera and the car in the first staging)
+    state.inCar = false;
+    missions.start(0);
+    state.cash = 1250;
+    state.clockMin = 1140; // 19:00
+    car.position.set(30, 0, 44);
+    car.rotation.y = 0.6;
+    player.visible = false;
+    state.camYaw = 0.6 + Math.PI;
+    preroll(2);
+    if (car.userData.door) car.userData.door.rotation.y = 0.95;
+    shotCamPos = new THREE.Vector3(24.2, 1.6, 47.9);
+    shotCamTarget = new THREE.Vector3(30, 0.7, 44);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
   }
   syncHUD();
   // one minimap draw right away so the first frame already shows it
@@ -1098,9 +1463,11 @@ function animate() {
   updateSun(state.inCar ? car.position : player.position);
 
   if (state.mode === 'playing') {
-    if (state.inCar) updateCar(dt);
+    if (state.transition) advanceTransition(dt);
+    else if (state.inCar) updateCar(dt);
     else updatePlayer(dt);
     traffic.playerPos = state.inCar ? car.position : player.position;
+    traffic.playerOnFoot = !state.inCar && !state.transition;
     traffic.update(dt);
     peds.update(dt);
     flockCity.update(dt);
@@ -1117,7 +1484,10 @@ function animate() {
     const playerSpeed = state.inCar ? Math.abs(state.carSpeed) : state.footSpeed;
     const busted = police.update(dt, playerPos, playerSpeed, !state.inCar);
     // v3: pursuit cars collide with buildings like everyone else
-    for (const pc of police.cars) collideBuildings(pc.position, 2.3);
+    for (const pc of police.cars) {
+      collideBuildings(pc.position, 2.3);
+      rollWheels(pc, (pc.userData.speed || 0) * dt);
+    }
     police.decay(dt);
     audio.setSiren(police.wanted > 0, dt);
     // mission logic
@@ -1137,6 +1507,25 @@ function animate() {
       }
     }
     if (busted) showEnd('busted');
+    // v5 mission guide (fix #3): live bearing + distance to the
+    // current objective, relative to the camera's view direction —
+    // updated every frame so the arrow tracks as you turn
+    {
+      let target = null;
+      if (missions.active && missions.current) {
+        const def = missions.current;
+        if (def.chase && chaseTarget.visible) target = chaseTarget.position;
+        else if (!def.escape) target = { x: def.target[0], z: def.target[1] };
+      }
+      if (target) {
+        const dx = target.x - playerPos.x, dz = target.z - playerPos.z;
+        let rel = Math.atan2(dx, dz) - (state.camYaw + Math.PI);
+        while (rel > Math.PI) rel -= TAU;
+        while (rel < -Math.PI) rel += TAU;
+        hud.setGuide(rel, Math.hypot(dx, dz));
+      } else hud.setGuide(null);
+    }
+    updateCarPrompt();
     // auto-save every 20s
     if (state.time % 20 < dt) writeSave();
     updateCamera(dt);
@@ -1182,5 +1571,5 @@ animate();
 window.__game = {
   state, missions, police, health, player, car, hud,
   traffic, peds, renderer, combat, flockCity, gulls,
-  scene, camera, cityGroup, worldInfo,
+  scene, camera, cityGroup, worldInfo, parked,
 };

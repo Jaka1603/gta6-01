@@ -342,20 +342,75 @@ export function zebraTexture() {
   });
 }
 
-// --- v3 stop sign face: red octagon field, white border + STOP ---
-// Drawn full-bleed: the octagonal cap geometry cuts the corners.
+// --- v5 stop sign face: red field, white OCTAGON ring + STOP ---
+// v3 drew a square border and let the cap geometry cut the corners;
+// the cylinder-cap UVs also mirrored the text (Jaka's phone shot
+// showed STOP backwards). v5 draws the real octagonal ring and the
+// texture is applied to flat CircleGeometry discs (planar UVs), so
+// the text reads correctly from BOTH approach sides.
 export function stopSignTexture() {
   return canvasTexture(256, 256, (ctx, w, h) => {
+    const cx = w / 2, cy = h / 2;
     ctx.fillStyle = '#c0272d';
     ctx.fillRect(0, 0, w, h);
+    // octagon ring, flat-top orientation matching the sign blank
+    const ring = (r) => {
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    };
     ctx.strokeStyle = '#f5f2ea';
-    ctx.lineWidth = 10;
-    ctx.strokeRect(18, 18, w - 36, h - 36);
+    ctx.lineWidth = 11;
+    ring(104);
+    ctx.stroke();
     ctx.fillStyle = '#f5f2ea';
-    ctx.font = 'bold 84px Arial, sans-serif';
+    ctx.font = 'bold 82px Arial, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('STOP', w / 2, h / 2 + 4);
+    ctx.fillText('STOP', cx, cy + 4);
+  });
+}
+
+// --- v5 car side panel: door seams + handles on transparency ---
+// Laid over both flanks of every car (one shared texture): front and
+// rear door outlines, two handles, a fuel flap and a sill shadow.
+// Transparent elsewhere, so it reads over any paint colour.
+export function carSideTexture() {
+  return canvasTexture(512, 128, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(12,12,16,0.55)';
+    ctx.lineWidth = 3;
+    // rear door (left of canvas = rear of car once mapped)
+    ctx.strokeRect(52, 14, 168, 96);
+    // front door
+    ctx.strokeRect(238, 14, 196, 96);
+    // handles: small rounded bars near the top rear of each door
+    ctx.fillStyle = 'rgba(15,15,20,0.8)';
+    const handle = (x, y) => {
+      ctx.beginPath();
+      ctx.roundRect(x, y, 34, 9, 4);
+      ctx.fill();
+    };
+    handle(178, 30);
+    handle(392, 30);
+    // fuel flap on the rear quarter
+    ctx.beginPath();
+    ctx.arc(30, 44, 11, 0, Math.PI * 2);
+    ctx.stroke();
+    // sill shadow along the bottom edge
+    const g = ctx.createLinearGradient(0, h - 26, 0, h);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, h - 26, w, 26);
+    // wheel-arch shading hints at both ends
+    ctx.fillStyle = 'rgba(0,0,0,0.20)';
+    ctx.beginPath(); ctx.arc(84, h, 46, Math.PI, 0); ctx.fill();
+    ctx.beginPath(); ctx.arc(w - 84, h, 46, Math.PI, 0); ctx.fill();
   });
 }
 

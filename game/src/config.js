@@ -110,8 +110,10 @@ export const CFG = {
   // beach west (bx 0..1), downtown centre (bx 2..4, bz 2..4),
   // port east (bx 5..6, bz 5..6), suburbs elsewhere
   // -- tuning --
-  playerWalk: 7,
-  playerRun: 11,
+  // v5 (Jaka): walk and run must READ as different gaits — run is
+  // more than twice walk speed, with its own animation + FOV kick.
+  playerWalk: 5.2,
+  playerRun: 11.5,
   carAccel: 26,
   carBrake: 40,
   carMax: 34,
