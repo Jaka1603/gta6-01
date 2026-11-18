@@ -1,7 +1,13 @@
-// PALMBAY HEAT — missions.js (v3): 5-mission story chain for Mama Rosa.
-// Checkpoint pillars, objective banner, timer, cash rewards.
+// PALMBAY HEAT — missions.js (v6): 7-mission story chain for Mama
+// Rosa. Checkpoint pillars, objective banner, timer, cash rewards.
 // v3 audit: chase missions can no longer be completed by simply
 // driving to the target point — only the 3 rams count.
+// v6 (brief N): two new mission types from the reference dissection —
+// FOLLOW (tail the courier, stay in the band, don't lose them) and
+// DELIVERY (package run that only counts while Dario is IN a car,
+// anchored at a shop's front door). Mission 1's checkpoint moved to
+// the beach bar's door (brief C) — world.js tells main where the
+// bar stands, and main patches the target before the chain starts.
 const THREE = window.THREE;
 import { CFG } from './config.js';
 import { roadCoord } from './world.js';
@@ -10,36 +16,51 @@ export const MISSION_DEFS = [
   {
     id: 1, name: 'PICKUP AT THE PIER',
     brief: 'Mama Rosa needs a package from the Sunset Pier. Drive to the marker.',
-    // v3 audit fix: the old target (-180, 60) is a block centre — INSIDE
-    // whatever building stands there, unreachable once building collision
-    // exists. The pier approach on the sand is the story spot.
-    target: [-236, 60], time: 0, reward: CFG.missionReward[0],
+    // v6 (brief C): the checkpoint is the BEACH BAR's door on the
+    // sand by the pier approach — reachable on foot and by car.
+    // main patches this from worldInfo.beachBar.door at build time;
+    // the fallback matches the built bar position.
+    target: [-228.5, 60], time: 0, reward: CFG.missionReward[0],
     text: 'Ambil paket di Sunset Pier.',
   },
   {
-    id: 2, name: 'THE CHASE',
+    id: 2, name: 'TAIL THE COURIER',
+    brief: 'A courier is walking Mama Rosa\'s ledger across town. Follow him — stay close, but don\'t touch him.',
+    target: [30, -90], time: 0, reward: CFG.missionReward[1],
+    follow: true, text: 'Ikuti kurir itu — jangan sampai lepas!',
+  },
+  {
+    id: 3, name: 'THE CHASE',
     brief: 'A rival crew took the package. Chase the blue sedan and ram it 3 times!',
-    target: [120, -120], time: 0, reward: CFG.missionReward[1],
-    // v2: mission 2's chase runs through gang turf (green zone on the
+    target: [120, -120], time: 0, reward: CFG.missionReward[2],
+    // v2: the chase runs through gang turf (green zone on the
   // minimap) — the rival crew's home ground.
   chase: true, text: 'Kejar sedan biru itu!', zone: 'GANG TURF',
   },
   {
-    id: 3, name: 'HOT DELIVERY',
+    id: 4, name: 'HOT DELIVERY',
     brief: 'Deliver the package to Palm Bay Motors before the timer runs out.',
-    target: [90, -30], time: 75, reward: CFG.missionReward[2],
+    target: [90, -30], time: 75, reward: CFG.missionReward[3],
     text: 'Antar paket tepat waktu!',
   },
   {
-    id: 4, name: 'HEAT ESCAPE',
+    id: 5, name: 'SPECIAL DELIVERY',
+    brief: 'A fragile crate for the diner. Drive it to Mama Rosa\'s front door — walking it over does not count.',
+    // main patches this to the diner door (bx3,bz3) from
+    // worldInfo.doors; the fallback is the diner block's kerb.
+    target: [16, 16], time: 0, reward: CFG.missionReward[4],
+    delivery: true, text: 'Antar krat ke pintu Mama Rosa — pakai mobil!',
+  },
+  {
+    id: 6, name: 'HEAT ESCAPE',
     brief: 'The cops are on you — 3 stars. Lose the heat: stay out of sight until the meter cools.',
-    target: [0, 0], time: 0, reward: CFG.missionReward[3],
+    target: [0, 0], time: 0, reward: CFG.missionReward[5],
     escape: true, text: 'Kabur dari polisi!',
   },
   {
-    id: 5, name: 'THE FINALE',
+    id: 7, name: 'THE FINALE',
     brief: 'Final job: bring the cash to Mama Rosa at the diner. No mistakes.',
-    target: [30, 30], time: 90, reward: CFG.missionReward[4],
+    target: [30, 30], time: 90, reward: CFG.missionReward[6],
     text: 'Bawa uangnya ke Mama Rosa.',
   },
 ];
@@ -47,6 +68,7 @@ export const MISSION_DEFS = [
 export class Missions {
   constructor(scene) {
     this.scene = scene;
+    this.defs = MISSION_DEFS;  // v6: exposed for tests + HUD counts
     this.index = 0;            // 0-based into MISSION_DEFS
     this.active = false;
     this.timer = 0;
@@ -56,6 +78,11 @@ export class Missions {
     this.chaseHits = 0;
     this.done = false;
     this.onEvent = null;       // (type, payload) -> hud/audio hooks
+    // v6 follow state: main drives the courier and reports here
+    this.followPos = null;     // courier position (THREE.Vector3-ish)
+    this.followDone = false;   // courier reached the last waypoint
+    this.loseT = 0;            // seconds spent outside the follow band
+    this.wpIndex = 0;          // courier waypoint reached (CHECKPOINT)
   }
   get current() { return MISSION_DEFS[this.index] || null; }
   get started() { return this.active; }
@@ -65,6 +92,10 @@ export class Missions {
     this.active = true;
     this.done = false;
     this.chaseHits = 0;
+    this.followPos = null;
+    this.followDone = false;
+    this.loseT = 0;
+    this.wpIndex = 0;
     const def = this.current;
     this.timer = def.time || 0;
     this.placeMarker(def.target[0], def.target[1]);
@@ -142,9 +173,28 @@ export class Missions {
     // generic reach-the-target check below used to finish it for free
     // because the target point is the chase car's start position
     if (def.chase) return null;
+    // v6 follow mission: main drives the courier; the player must
+    // stay inside the follow band (4..32 m). Five seconds outside
+    // the band loses the tail and fails the mission.
+    if (def.follow) {
+      if (this.followDone) return this.complete();
+      if (this.followPos) {
+        const d = Math.hypot(
+          playerPos.x - this.followPos.x, playerPos.z - this.followPos.z);
+        if (d > 32 || d < 2.2) this.loseT += dt;
+        else this.loseT = Math.max(0, this.loseT - dt * 2);
+        if (this.loseT > 5) {
+          this.fail(d < 2.2 ? 'Terlalu dekat — kurirnya kabur!' : 'Kehilangan jejak kurir!');
+          return 'failed';
+        }
+      }
+      return null;
+    }
     const dx = playerPos.x - def.target[0];
     const dz = playerPos.z - def.target[1];
     if (Math.hypot(dx, dz) < 6) {
+      // v6 delivery: the crate only counts delivered from a vehicle
+      if (def.delivery && !playerInCar) return null;
       return this.complete();
     }
     return null;
@@ -184,6 +234,7 @@ export class Missions {
   reset() {
     this.index = 0; this.active = false; this.done = false;
     this.timer = 0; this.chaseHits = 0;
+    this.followPos = null; this.followDone = false; this.loseT = 0;
     this.clearMarker();
   }
 }

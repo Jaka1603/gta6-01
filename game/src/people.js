@@ -8,7 +8,7 @@
 // Pedestrians walk the SIDEWALKS along the road grid (lane offset now
 // derived from each road's real width — avenues included).
 const THREE = window.THREE;
-import { CFG, PALETTE, SCALE, clamp } from './config.js';
+import { CFG, PALETTE, SCALE, clamp, gameRand } from './config.js';
 import { roadCoord, nearestRoadCoord, roadHalfAt } from './world.js';
 import { faceTexture, torsoPrintTexture } from './textures.js';
 
@@ -174,11 +174,20 @@ export function makePerson(shirt, pants, skin = 0xd9a066, opts = {}) {
   upper.add(armL, armR);
   g.userData = {
     legL, legR, armL, armR, upper, torso, head,
-    walkPhase: Math.random() * 6,
+    walkPhase: gameRand() * 6,
     speed: 0, heading: 0, fleeing: false,
     isPerson: true,
     minifig: true,
     knock: null,          // v5: active knockdown state, if any
+    // v7 (skill: State Machines): ONE explicit AI state label,
+    // maintained at every transition — walk | flee | brawl | knock
+    // | dead — so tests/debugging read state, not flag piles
+    aiState: 'walk',
+    // v6: health + fist-fight state (brief M). hp is shared by peds,
+    // gang members and officers; brawl is driven by the owner class.
+    hp: 100, dead: false,
+    brawl: null,          // { target, onStrike } while fighting
+    punchCd: 0, punchAnim: 0, staggerT: 0,
     // walk(phase, amp, lean) swings limbs and leans the torso;
     // called by owners, not here. v5 gait split (Jaka fix #6):
     // walking = small amp, upright; running = big amp + lean.
@@ -209,6 +218,7 @@ export function makePerson(shirt, pants, skin = 0xd9a066, opts = {}) {
 export function knockPerson(person, vx, vz, downTime = 1.15) {
   const u = person.userData;
   if (u.knock) return false;
+  u.aiState = 'knock';
   const speed = Math.hypot(vx, vz);
   u.knock = {
     t: 0, dur: downTime + Math.min(0.5, speed * 0.03),
@@ -242,10 +252,115 @@ export function updateKnock(person, dt) {
   person.rotation.x = a;
   if (k.t >= k.dur) {
     u.knock = null;
+    u.aiState = u.dead ? 'dead' : (u.brawl ? 'brawl' : 'walk');
     person.rotation.x = 0;
     person.position.y = 0;
     u.idle();
     return false;
+  }
+  return true;
+}
+
+// --- v6 damage + fist-fighting (brief M) ---------------------------
+// hurtPerson applies damage to any minifig: stagger on solid hits,
+// a long knockdown at 0 hp (dead — owners stop driving the figure).
+// Returns 'dead' | 'stagger' | 'ok'.
+export function hurtPerson(person, dmg, fromX = 0, fromZ = 0) {
+  const u = person.userData;
+  if (u.dead) return 'dead';
+  u.hp -= dmg;
+  if (u.hp <= 0) {
+    u.dead = true;
+    u.aiState = 'dead';
+    u.brawl = null;
+    const dx = person.position.x - fromX, dz = person.position.z - fromZ;
+    const d = Math.hypot(dx, dz) || 1;
+    // a very long down-time: the figure stays down for the session
+    if (!knockPerson(person, (dx / d) * 3.5, (dz / d) * 3.5, 9999) && u.knock) {
+      u.knock.dur = 9999;   // already down (car hit) — keep them down
+    }
+    return 'dead';
+  }
+  if (dmg >= 10 && u.staggerT <= 0) {
+    u.staggerT = 0.38;
+    return 'stagger';
+  }
+  return 'ok';
+}
+
+// startBrawl makes `person` fight `target` (another figure, usually
+// the player): the owner class (Pedestrians / Police / main's gang
+// driver) advances it via updateBrawl each frame; onStrike fires
+// when a punch lands in range so the owner can apply damage.
+export function startBrawl(person, target, onStrike) {
+  const u = person.userData;
+  if (u.dead || u.knock) return false;
+  u.brawl = { target, onStrike };
+  u.aiState = 'brawl';
+  u.fleeing = false;
+  u.fleeTimer = undefined;
+  u.punchCd = 0.3 + gameRand() * 0.4;
+  return true;
+}
+
+export function stopBrawl(person) {
+  person.userData.brawl = null;
+  if (!person.userData.dead && person.userData.aiState === 'brawl') {
+    person.userData.aiState = 'walk';
+  }
+}
+
+// Advance one brawling figure: approach the target, strike when in
+// range (arm swing + onStrike), stagger freezes movement briefly.
+// Returns false when the brawl ended (target gone / figure down).
+export function updateBrawl(person, dt, rand) {
+  const u = person.userData;
+  const b = u.brawl;
+  if (!b || u.dead) return false;
+  if (u.knock) return true;             // down, but still in the fight
+  const t = b.target;
+  if (!t || (t.userData && t.userData.dead)) { u.brawl = null; return false; }
+  const dx = t.position.x - person.position.x;
+  const dz = t.position.z - person.position.z;
+  const d = Math.hypot(dx, dz);
+  u.heading = Math.atan2(dx, dz);
+  person.rotation.y = u.heading;
+  if (u.staggerT > 0) {
+    u.staggerT -= dt;
+    // reel back: arms flung up, torso leaning away
+    u.armL.rotation.x = -2.5; u.armR.rotation.x = -2.2;
+    u.upper.rotation.x = -0.22;
+    person.position.x -= Math.sin(u.heading) * dt * 1.2;
+    person.position.z -= Math.cos(u.heading) * dt * 1.2;
+    return true;
+  }
+  if (u.punchAnim > 0) {
+    u.punchAnim -= dt;
+    const k = Math.sin(Math.max(0, u.punchAnim) / 0.22 * Math.PI);
+    u.armR.rotation.x = -0.4 - k * 1.9;   // the haymaker swing
+  }
+  if (d > 1.85) {
+    // approach at a fighting jog, fists up
+    const sp = 3.7;
+    person.position.x += Math.sin(u.heading) * sp * dt;
+    person.position.z += Math.cos(u.heading) * sp * dt;
+    u.walkPhase += dt * sp * 3.1;
+    u.walk(u.walkPhase, 0.8, 0.12);
+    u.armL.rotation.x = -1.1;            // guard hand stays up
+    if (u.punchAnim <= 0) u.armR.rotation.x = -1.1;
+    u.speed = sp;
+  } else {
+    // in range: circle a little, strike on the cooldown
+    u.idle();
+    u.armL.rotation.x = -1.1;
+    if (u.punchAnim <= 0) u.armR.rotation.x = -1.1;
+    u.punchCd -= dt;
+    if (u.punchCd <= 0) {
+      u.punchCd = 0.75 + rand() * 0.5;
+      u.punchAnim = 0.22;
+      if (d < 2.35 && b.onStrike) b.onStrike(person);
+    }
+    u.speed = 0;
   }
   return true;
 }
@@ -284,20 +399,95 @@ export function makeRifle() {
   return g;
 }
 
+// --- v6 weapon meshes: SMG, pump shotgun, heavy pistol ------------
+// Same construction language as the pistol/rifle (dark metal boxes),
+// sized to read in a minifig C-hand and as world pickup icons.
+export function makeSMG() {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1c1c20, roughness: 0.42, metalness: 0.55 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.09, 0.42), dark);
+  body.position.set(0, 0.02, 0.08);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.16, 8), dark);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0.03, 0.36);
+  const mag = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.2, 0.07), dark);
+  mag.position.set(0, -0.09, 0.1);
+  mag.rotation.x = 0.12;
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.07, 0.16), dark);
+  stock.position.set(0, 0.01, -0.18);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.13, 0.06), dark);
+  grip.position.set(0, -0.06, -0.04);
+  grip.rotation.x = 0.25;
+  g.add(body, barrel, mag, stock, grip);
+  return g;
+}
+
+export function makeShotgun() {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.45, metalness: 0.5 });
+  const wood = new THREE.MeshStandardMaterial({ color: 0x7a4a26, roughness: 0.85 });
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.62, 10), dark);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0.03, 0.22);
+  const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 8), dark);
+  tube.rotation.x = Math.PI / 2;
+  tube.position.set(0, -0.015, 0.18);
+  const pump = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.075, 0.2), wood);
+  pump.position.set(0, -0.015, 0.16);
+  const recv = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.24), dark);
+  recv.position.set(0, 0.01, -0.14);
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.13, 0.3), wood);
+  stock.position.set(0, -0.03, -0.38);
+  stock.rotation.x = 0.12;
+  g.add(barrel, tube, pump, recv, stock);
+  return g;
+}
+
+export function makeHeavyPistol() {
+  const g = new THREE.Group();
+  const steel = new THREE.MeshStandardMaterial({ color: 0x8a8f96, roughness: 0.3, metalness: 0.75 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.4, metalness: 0.6 });
+  const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.07, 0.34), steel);
+  barrel.position.set(0, 0.05, 0.14);
+  const vent = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.03, 0.2), dark);
+  vent.position.set(0, 0.095, 0.16);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.17, 0.08), dark);
+  grip.position.set(0, -0.05, -0.02);
+  grip.rotation.x = 0.15;
+  const sight = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.035, 0.02), dark);
+  sight.position.set(0, 0.1, 0.02);
+  g.add(barrel, vent, grip, sight);
+  return g;
+}
+
+// Any handheld weapon mesh by kind (player hands + pickup icons).
+export function makeWeaponMesh(kind) {
+  switch (kind) {
+    case 'rifle': return makeRifle();
+    case 'smg': return makeSMG();
+    case 'shotgun': return makeShotgun();
+    case 'heavy': return makeHeavyPistol();
+    default: return makePistol();
+  }
+}
+
 // Attach a weapon to a person's right hand (hand = end of armR pivot).
 // Returns the weapon group; call detachWeapon(person) to remove it.
 export function attachWeapon(person, kind) {
   detachWeapon(person);
-  const w = kind === 'rifle' ? makeRifle() : makePistol();
+  const w = makeWeaponMesh(kind);
   const armR = person.userData.armR;
   // hand sits at the bottom of the arm: y -0.62 in pivot space
   w.position.set(0, -0.62, 0.02);
-  if (kind === 'rifle') {
-    // rifle held across the body, barrel forward (+Z of the person)
+  if (kind === 'rifle' || kind === 'shotgun') {
+    // long guns held across the body, barrel forward (+Z)
     w.rotation.x = Math.PI / 2 - 0.35;
     w.position.set(0, -0.62, 0.12);
+  } else if (kind === 'smg') {
+    w.rotation.x = Math.PI / 2 - 0.15;
+    w.position.set(0, -0.62, 0.06);
   } else {
-    // pistol points forward when the arm aims
+    // pistols point forward when the arm aims
     w.rotation.x = Math.PI / 2;
   }
   armR.add(w);
@@ -379,10 +569,12 @@ export class Pedestrians {
   }
   fleeFrom(x, z, radius = 18) {
     for (const p of this.peds) {
+      if (p.userData.dead || p.userData.brawl) continue;
       const dx = p.position.x - x, dz = p.position.z - z;
       const d = Math.hypot(dx, dz);
       if (d < radius) {
         p.userData.fleeing = true;
+        p.userData.aiState = 'flee';
         p.userData.heading = Math.atan2(dx, dz);
         p.userData.speed = 4.5;
         p.userData.fleeTimer = 3;
@@ -392,6 +584,17 @@ export class Pedestrians {
   update(dt) {
     for (const p of this.peds) {
       const u = p.userData;
+      // v6: the dead stay down; brawlers fight (brief M) — both
+      // bypass the sidewalk-lane logic entirely
+      if (u.dead) {
+        if (u.knock) updateKnock(p, dt);
+        continue;
+      }
+      if (u.brawl) {
+        if (u.knock) { updateKnock(p, dt); continue; }
+        updateBrawl(p, dt, this.rand);
+        continue;
+      }
       // v5: a knocked-down pedestrian slides + tumbles first; the
       // sidewalk-lane logic below must not teleport them back
       if (u.knock) {
@@ -418,6 +621,7 @@ export class Pedestrians {
         u.fleeTimer -= dt;
         if (u.fleeTimer <= 0) {
           u.fleeing = false;
+          if (u.aiState === 'flee') u.aiState = 'walk';
           u.speed = 1.2 + this.rand() * 0.5;
           u.fleeTimer = undefined;
           // snap back to a sidewalk lane

@@ -230,6 +230,25 @@ function addLights(car, s, brakeMat) {
   const hm = new THREE.Mesh(mergeColored(heads), hlMat);
   const tm = new THREE.Mesh(mergeColored(tails), brakeMat);
   car.add(hm, tm);
+  // v6 (brief N): headlight beam cones for dusk — one merged mesh
+  // per car, hidden by default; main switches on the nearest ~8.
+  const coneParts = [];
+  for (const sx of [-0.58, 0.58]) {
+    const cone = new THREE.ConeGeometry(1.35, 6.5, 12, 1, true);
+    cone.translate(0, -3.25, 0);            // apex at the origin
+    cone.rotateX(-Math.PI / 2 + 0.07);      // beam forward +Z, dipping
+    cone.translate(sx, 0.82, s.l / 2 + 0.1);
+    coneParts.push({ geo: cone });
+  }
+  const beams = new THREE.Mesh(mergeColored(coneParts), new THREE.MeshBasicMaterial({
+    color: 0xffdf9a, transparent: true, opacity: 0.085,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+    side: THREE.DoubleSide, fog: false,
+  }));
+  beams.visible = false;
+  beams.frustumCulled = false;
+  car.add(beams);
+  car.userData.headlightCones = beams;
 }
 function addPlate(car, s, text) {
   const tex = plateTexture(text);
@@ -277,9 +296,14 @@ export function makeCar(styleIdx, color, isPolice = false) {
   const brakeMat = new THREE.MeshStandardMaterial({
     color: 0x330000, emissive: 0xff2211, emissiveIntensity: 1,
   });
+  // v6 (brief G): per-car durability — vans/pickups/SUVs are tougher
+  // than sedans; damage stages + explosion are driven from main.
+  const HP_BY_STYLE = { sedan: 100, coupe: 100, taxi: 100, suv: 125, pickup: 135, van: 150 };
+  const maxHp = HP_BY_STYLE[s.name] || 100;
   g.userData = {
     style: s, lightBar: null, speed: 0, maxSpeed: 0,
     steer: 0, isPolice, brakeMat,
+    hp: maxHp, maxHp, dmgStage: 0, exploded: false, smokeT: 0, flame: null,
   };
   const bodyTop = 0.55 + s.h;              // top of the lower body
   const cabZ = -s.l * 0.08;                // cabin centre
@@ -436,6 +460,7 @@ export function makeConvertible(paintHex) {
   g.userData = {
     style: s, lightBar: null, speed: 0, maxSpeed: 0,
     steer: 0, isPolice: false, brakeMat, convertible: true,
+    hp: 120, maxHp: 120, dmgStage: 0, exploded: false, smokeT: 0, flame: null,
   };
   const paintMat = paintMatFor(paintHex);
   const bodyTop = 0.55 + s.h;
@@ -520,6 +545,71 @@ export function heroCar() {
   c.userData.maxSpeed = CFG.carMax;
   c.userData.hero = true;
   return c;
+}
+
+// --- v6 vehicle destruction (brief G) ------------------------------
+// Damage stage from remaining HP: 0 clean, 1 light smoke (<=50%),
+// 2 dark smoke + flame + power loss (<=25%), 3 wreck (0).
+export function damageStage(car) {
+  const u = car.userData;
+  if (u.exploded) return 3;
+  const pct = u.hp / u.maxHp;
+  if (pct <= 0.25) return 2;
+  if (pct <= 0.5) return 1;
+  return 0;
+}
+
+// Apply damage; returns true when this hit destroyed the car.
+export function damageVehicle(car, dmg) {
+  const u = car.userData;
+  if (u.exploded) return false;
+  u.hp = Math.max(0, u.hp - dmg);
+  u.dmgStage = damageStage(car);
+  return u.hp <= 0;
+}
+
+// Turn a destroyed car into a blackened wreck: every material is
+// cloned once and darkened (shared mats stay clean for other cars),
+// glows die, the engine stops. The hulk stays in the world. The
+// original material is kept on each mesh so restoreCar can undo it.
+export function setCarWreck(car) {
+  const u = car.userData;
+  u.exploded = true;
+  u.dmgStage = 3;
+  u.speed = 0;
+  u.curSpeed = 0;
+  if (u.headlightCones) u.headlightCones.visible = false;
+  car.traverse((o) => {
+    if (o.isSprite) { o.visible = false; return; }
+    if (o.isMesh && o.material && o.material.color) {
+      if (!o.userData.origMat) o.userData.origMat = o.material;
+      o.material = o.material.clone();
+      o.material.color.multiplyScalar(0.2);
+      if ('emissiveIntensity' in o.material) o.material.emissiveIntensity = 0;
+      if (o.material.transparent && o.material.blending === THREE.AdditiveBlending) {
+        o.visible = false;
+      }
+    }
+  });
+  if (u.lightBar) u.lightBar.visible = false;
+}
+
+// Undo a wreck (new game / retry): original materials back, HP full.
+export function restoreCar(car) {
+  const u = car.userData;
+  u.exploded = false;
+  u.hp = u.maxHp;
+  u.dmgStage = 0;
+  car.traverse((o) => {
+    if (o.isSprite) { o.visible = true; return; }
+    if (o.isMesh && o.userData.origMat) {
+      o.material = o.userData.origMat;
+      delete o.userData.origMat;
+      o.visible = true;
+    }
+  });
+  if (u.lightBar) u.lightBar.visible = true;
+  if (u.flame) u.flame.visible = false;
 }
 
 // brake lights on/off (emissive + glow sprite). v3: cached — the
@@ -627,6 +717,8 @@ export class Traffic {
   update(dt) {
     for (const car of this.cars) {
       const u = car.userData;
+      // v6: a wrecked traffic car is a hulk — it never drives again
+      if (u.exploded) { setBrake(car, false); continue; }
       u.turnCooldown -= dt;
       if (u.hitT > 0) u.hitT -= dt;
       const fwd = new THREE.Vector3(0, 0, 1).applyEuler(car.rotation);

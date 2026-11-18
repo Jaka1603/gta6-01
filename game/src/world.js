@@ -37,6 +37,10 @@ export const worldInfo = {
   lamps: [],           // {x,z} street lamp bases
   signs: [],           // {x,z,kind} traffic lights + stop signs
   benches: [],         // {x,z} bench centres
+  // v6 additions
+  doors: [],           // {x,z,yaw,block,zone} every building's entrance
+  houses: [],          // enterable house records (briefs J/K)
+  beachBar: null,      // { door:{x,z}, rect } — mission 1 anchor (brief C)
 };
 
 // --- v3 geometry helpers: merge many small geoms into ONE draw call ---
@@ -80,6 +84,46 @@ function uvScale(geo, su, sv) {
   if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * su, uv.getY(i) * sv);
   return geo;
 }
+// v6: merge with a baked vertex colour per part (houses, the beach
+// bar, furniture — one material, one draw call per class)
+const _cc = new THREE.Color();
+function mergeColored(list) {
+  let total = 0;
+  const parts = list.map((p) => {
+    const n = p.geo.index ? p.geo.toNonIndexed() : p.geo;
+    const cnt = n.attributes.position.count;
+    const col = new Float32Array(cnt * 3);
+    _cc.set(p.color === undefined ? 0xffffff : p.color);
+    for (let i = 0; i < cnt; i++) {
+      col[i * 3] = _cc.r; col[i * 3 + 1] = _cc.g; col[i * 3 + 2] = _cc.b;
+    }
+    n.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    total += cnt;
+    return n;
+  });
+  const pos = new Float32Array(total * 3);
+  const nor = new Float32Array(total * 3);
+  const uv = new Float32Array(total * 2);
+  const col = new Float32Array(total * 3);
+  let o3 = 0, o2 = 0;
+  for (const g of parts) {
+    pos.set(g.attributes.position.array, o3);
+    nor.set(g.attributes.normal.array, o3);
+    if (g.attributes.uv) uv.set(g.attributes.uv.array, o2);
+    col.set(g.attributes.color.array, o3);
+    o3 += g.attributes.position.count * 3;
+    o2 += g.attributes.position.count * 2;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return out;
+}
+const coloredMat = () => new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.85, metalness: 0.0,
+});
 // distance from a point to an AABB (0 when inside) — placement validation
 function rectDist(x, z, r) {
   const dx = Math.max(r.x0 - x, 0, x - r.x1);
@@ -343,6 +387,258 @@ export function buildWorld(scene, rand) {
     group.add(zm);
   }
 
+  // ================= v6: houses, interiors, beach bar =============
+  // Suburb blocks become a real residential district (brief J):
+  // small + medium houses with pyramid roofs, lawns, paths and
+  // fences — merged city-wide into 3 draw calls. Three houses are
+  // ENTERABLE with furnished interiors (brief K). Every building in
+  // the city gets an entrance door (brief I) via one instanced pass.
+  const doorSpots = [];   // {x, z(face plane), yaw}
+  const houseWallParts = [], houseRoofParts = [], houseTrimParts = [];
+  const HOUSE_WALLS = [0xf7ead9, 0xf3e2c7, 0xdfe9ec, 0xf2c4ce, 0xcfe3ee, 0xeec39a];
+  const HOUSE_ROOFS = [0xb85a3a, 0x8a4a3a, 0x6a7a8a, 0x9a5a44, 0x7a6a5a];
+  const ENTERABLE_BLOCKS = { '3,0': 0, '6,3': 1, '2,5': 2 };
+  const boxG = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const cylG = (rt, rb, h, s = 10) => new THREE.CylinderGeometry(rt, rb, h, s);
+  function pyramidRoofGeo() {
+    const g = new THREE.CylinderGeometry(0.01, 1, 1, 4);
+    g.rotateY(Math.PI / 4);
+    return g;
+  }
+  function houseDoorSpot(x, z, yaw, blockKey, zone) {
+    doorSpots.push({ x, z, yaw });
+    worldInfo.doors.push({ x, z, yaw, block: blockKey, zone });
+  }
+
+  // one solid (non-enterable) house, merged into the city arrays
+  function simpleHouse(x, z, w, d, wallC, roofC, blockKey) {
+    const h = 3.1;
+    houseWallParts.push({ geo: xform(boxG(w, h, d), x, h / 2, z), color: wallC });
+    houseRoofParts.push({
+      geo: xform(pyramidRoofGeo(), x, h + 0.85, z, 0, (w + 1.1) / 1.414, 1.7, (d + 1.1) / 1.414),
+      color: roofC,
+    });
+    // garden: lawn, path to the door, front fence with a gap, shrubs
+    houseTrimParts.push({ geo: xform(boxG(w + 5, 0.07, d + 4.5), x, 0.035, z), color: 0x69a854 });
+    const doorX = x + w * 0.18;
+    houseTrimParts.push({ geo: xform(boxG(1.3, 0.09, 2.3), doorX, 0.05, z - d / 2 - 1.15), color: 0xcfc4ae });
+    const fz = z - d / 2 - 2.25;
+    const gx0 = x - (w + 5) / 2, gx1 = x + (w + 5) / 2;
+    const gapL = doorX - 0.85, gapR = doorX + 0.85;
+    if (gapL > gx0) houseTrimParts.push({ geo: xform(boxG(gapL - gx0, 0.55, 0.07), (gx0 + gapL) / 2, 0.32, fz), color: 0xf0ead8 });
+    if (gx1 > gapR) houseTrimParts.push({ geo: xform(boxG(gx1 - gapR, 0.55, 0.07), (gapR + gx1) / 2, 0.32, fz), color: 0xf0ead8 });
+    for (const sx of [-1, 1]) {
+      houseTrimParts.push({
+        geo: xform(new THREE.SphereGeometry(0.55, 8, 6), x + sx * (w / 2 - 0.6), 0.5, z - d / 2 - 0.7, 0, 1, 0.75, 1),
+        color: 0x3f7a34,
+      });
+    }
+    worldInfo.buildingRects.push({ x0: x - w / 2, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 });
+    houseDoorSpot(doorX, z - d / 2, Math.PI, blockKey, 'suburb');
+  }
+
+  // one ENTERABLE house (brief K): walls with a real door opening,
+  // hinged door, furnished interior merged into ONE mesh + a TV.
+  // Roof and far (north) wall are separate so main can hide them
+  // while Dario is inside. Wall segments join buildingRects, so the
+  // house is solid except at its doorway.
+  function enterableHouse(x, z, w, d, wallC, roofC, blockKey, idx) {
+    const g = new THREE.Group();
+    const H = 3.1, T = 0.18;
+    const doorW = 1.25, doorH = 2.15;
+    const doorX = x + w * 0.18;
+    // floor slab (wood)
+    const floor = new THREE.Mesh(boxG(w, 0.14, d),
+      new THREE.MeshStandardMaterial({ color: 0x9a7248, roughness: 0.9 }));
+    floor.position.set(x, 0.07, z);
+    floor.receiveShadow = true;
+    g.add(floor);
+    // solid walls merged: west, east, and the south wall in three
+    // pieces around the door opening (+ lintel above it)
+    const parts = [];
+    parts.push({ geo: xform(boxG(T, H, d), x - w / 2 + T / 2, H / 2, z), color: wallC });
+    parts.push({ geo: xform(boxG(T, H, d), x + w / 2 - T / 2, H / 2, z), color: wallC });
+    const sZ = z - d / 2 + T / 2;
+    const leftW = (doorX - doorW / 2) - (x - w / 2);
+    const rightW = (x + w / 2) - (doorX + doorW / 2);
+    parts.push({ geo: xform(boxG(leftW, H, T), x - w / 2 + leftW / 2, H / 2, sZ), color: wallC });
+    parts.push({ geo: xform(boxG(rightW, H, T), doorX + doorW / 2 + rightW / 2, H / 2, sZ), color: wallC });
+    parts.push({ geo: xform(boxG(doorW, H - doorH, T), doorX, doorH + (H - doorH) / 2, sZ), color: wallC });
+    const wallsMesh = new THREE.Mesh(mergeColored(parts), coloredMat());
+    wallsMesh.castShadow = true;
+    wallsMesh.receiveShadow = true;
+    g.add(wallsMesh);
+    // far (north) wall — separate, hides while the player is inside
+    const farWall = new THREE.Mesh(boxG(w, H, T),
+      new THREE.MeshStandardMaterial({ color: wallC, roughness: 0.9 }));
+    farWall.position.set(x, H / 2, z + d / 2 - T / 2);
+    farWall.castShadow = true;
+    g.add(farWall);
+    // pyramid roof — separate, hides while inside
+    const roof = new THREE.Mesh(pyramidRoofGeo(),
+      new THREE.MeshStandardMaterial({ color: roofC, roughness: 0.9, flatShading: true }));
+    roof.scale.set((w + 1.1) / 1.414, 1.9, (d + 1.1) / 1.414);
+    roof.position.set(x, H + 0.95, z);
+    roof.castShadow = true;
+    g.add(roof);
+    // hinged front door
+    const doorPivot = new THREE.Group();
+    doorPivot.position.set(doorX - doorW / 2, 0, z - d / 2);
+    const doorPanel = new THREE.Mesh(boxG(doorW, doorH, 0.07),
+      new THREE.MeshStandardMaterial({ color: 0x2a6a7a, roughness: 0.6 }));
+    doorPanel.position.set(doorW / 2, doorH / 2, 0);
+    doorPanel.castShadow = true;
+    doorPivot.add(doorPanel);
+    g.add(doorPivot);
+    // ---- furnished interior (brief K): ONE merged mesh ----------
+    const F = [];
+    const fp = (geo, fx, fy, fz, color) => F.push({ geo: xform(geo, fx, fy, fz), color });
+    // living room (west): rug, sofa facing the TV, coffee table,
+    // floor lamp, plant, wall art
+    fp(boxG(3.2, 0.04, 2.2), x - w / 2 + 2.2, 0.17, z - 1, 0xb84a6a);
+    fp(boxG(0.9, 0.5, 2.2), x - w / 2 + 2.9, 0.4, z - 1, 0x3a6a8a);          // sofa base
+    fp(boxG(0.25, 0.75, 2.2), x - w / 2 + 3.3, 0.52, z - 1, 0x2f5872);      // sofa back
+    fp(boxG(0.9, 0.32, 0.25), x - w / 2 + 2.9, 0.55, z - 2.05, 0x2f5872);   // sofa arm
+    fp(boxG(0.9, 0.32, 0.25), x - w / 2 + 2.9, 0.55, z + 0.05, 0x2f5872);   // sofa arm
+    fp(boxG(1.1, 0.07, 0.6), x - w / 2 + 1.75, 0.5, z - 1, 0x6a4a30);       // coffee table top
+    fp(boxG(1.0, 0.05, 0.5), x - w / 2 + 1.75, 0.24, z - 1, 0x54382a);      // coffee table shelf
+    fp(boxG(0.4, 0.5, 1.6), x - w / 2 + 0.5, 0.4, z - 1, 0x333340);         // TV stand
+    fp(cylG(0.03, 0.03, 1.5, 6), x - w / 2 + 0.7, 0.9, z + d / 2 - 0.8, 0x8a8a92); // lamp pole
+    fp(cylG(0.16, 0.23, 0.28, 10), x - w / 2 + 0.7, 1.72, z + d / 2 - 0.8, 0xffd9a0); // lamp shade
+    fp(cylG(0.16, 0.13, 0.3, 9), x + w / 2 - 0.7, 0.3, z - d / 2 + 0.7, 0xb85a3a);  // plant pot
+    fp(new THREE.SphereGeometry(0.34, 8, 6), x + w / 2 - 0.7, 0.78, z - d / 2 + 0.7, 0x3f7a34); // plant
+    fp(new THREE.SphereGeometry(0.24, 8, 6), x + w / 2 - 0.55, 1.0, z - d / 2 + 0.85, 0x4c9440);
+    fp(boxG(0.05, 0.7, 0.95), x + w / 2 - 0.16, 1.75, z - 2.2, 0xe76f51);   // wall art
+    // kitchen (north-east): counter run, fridge, stove
+    fp(boxG(3.4, 0.9, 0.65), x + w / 2 - 2.3, 0.6, z + d / 2 - 0.55, 0xd8d2c2);  // counter
+    fp(boxG(3.5, 0.06, 0.72), x + w / 2 - 2.3, 1.08, z + d / 2 - 0.55, 0x4a4a52); // counter top
+    fp(boxG(0.8, 1.8, 0.7), x + w / 2 - 0.75, 1.05, z + d / 2 - 0.6, 0xc8ccd2);   // fridge
+    fp(boxG(0.05, 0.5, 0.05), x + w / 2 - 1.12, 1.3, z + d / 2 - 0.28, 0x8a8f96); // fridge handle
+    fp(boxG(0.7, 0.85, 0.65), x + 0.4, 0.57, z + d / 2 - 0.55, 0xe8e4da);        // stove
+    for (const [bx2, bz2] of [[-0.16, -0.14], [0.16, -0.14], [-0.16, 0.14], [0.16, 0.14]]) {
+      fp(cylG(0.09, 0.09, 0.03, 10), x + 0.4 + bx2, 1.01, z + d / 2 - 0.55 + bz2, 0x1c1c20); // burners
+    }
+    // dining set (centre-east): table + 4 chairs
+    fp(boxG(1.5, 0.07, 0.95), x + 1.3, 0.86, z + 0.9, 0x7a5230);
+    for (const [lx, lz] of [[-0.65, -0.38], [0.65, -0.38], [-0.65, 0.38], [0.65, 0.38]]) {
+      fp(boxG(0.07, 0.82, 0.07), x + 1.3 + lx, 0.43, z + 0.9 + lz, 0x5f3f24);
+    }
+    for (const [chx, chz, ry] of [[0.55, 0.9, 0], [2.05, 0.9, 0], [1.3, 0.05, 0], [1.3, 1.75, 0]]) {
+      void ry;
+      fp(boxG(0.42, 0.05, 0.42), x + chx, 0.56, z + chz, 0x8a5a34);
+      fp(boxG(0.42, 0.5, 0.05), x + chx, 0.83, z + chz + (chz < 0.9 ? -0.19 : 0.19), 0x8a5a34);
+    }
+    // bedroom (north-west): bed, wardrobe, nightstand
+    fp(boxG(1.6, 0.3, 2.2), x - w / 2 + 1.7, 0.3, z + d / 2 - 1.8, 0x6a4a30);   // bed frame
+    fp(boxG(1.5, 0.22, 2.1), x - w / 2 + 1.7, 0.56, z + d / 2 - 1.8, 0xf0ead8); // mattress
+    fp(boxG(1.52, 0.1, 1.3), x - w / 2 + 1.7, 0.68, z + d / 2 - 1.45, 0x2a9d8f); // blanket
+    fp(boxG(0.6, 0.12, 0.4), x - w / 2 + 1.7, 0.72, z + d / 2 - 2.6, 0xffffff);  // pillow
+    fp(boxG(1.4, 2.1, 0.5), x - w / 2 + 3.6, 1.2, z + d / 2 - 0.45, 0x7a5230);   // wardrobe
+    fp(boxG(0.5, 0.45, 0.4), x - w / 2 + 2.85, 0.37, z + d / 2 - 2.7, 0x8a5a34); // nightstand
+    fp(boxG(0.16, 0.2, 0.16), x - w / 2 + 2.85, 0.7, z + d / 2 - 2.7, 0xffd9a0);  // bedside lamp
+    const interior = new THREE.Group();
+    const furn = new THREE.Mesh(mergeColored(F), coloredMat());
+    furn.receiveShadow = true;
+    interior.add(furn);
+    // the TV: emissive screen on its stand, facing the sofa (+X)
+    const tv = new THREE.Mesh(boxG(0.07, 0.85, 1.5),
+      new THREE.MeshBasicMaterial({ color: 0x9fd8e8 }));
+    tv.position.set(x - w / 2 + 0.32, 1.3, z - 1);
+    interior.add(tv);
+    interior.visible = false;   // main shows it when the player is near
+    g.add(interior);
+    group.add(g);
+    // collision: wall segments (the doorway stays open)
+    worldInfo.buildingRects.push(
+      { x0: x - w / 2, z0: z - d / 2, x1: x - w / 2 + T, z1: z + d / 2 },
+      { x0: x + w / 2 - T, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 },
+      { x0: x - w / 2, z0: z + d / 2 - T, x1: x + w / 2, z1: z + d / 2 },
+      { x0: x - w / 2, z0: z - d / 2, x1: doorX - doorW / 2, z1: z - d / 2 + T },
+      { x0: doorX + doorW / 2, z0: z - d / 2, x1: x + w / 2, z1: z - d / 2 + T }
+    );
+    worldInfo.houses.push({
+      x, z, w, d, idx, block: blockKey,
+      rect: { x0: x - w / 2, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 },
+      doorPos: { x: doorX, z: z - d / 2 - 0.9 },
+      doorPivot, roof, farWall, interior,
+      furnitureCount: 14,
+      pickupSpot: { x: x - w / 2 + 1.7, z: z - 1 },
+      group: g,
+    });
+  }
+
+  function buildSuburbBlock(bx, bz, cx, cz) {
+    const key = bx + ',' + bz;
+    const spots = [[-11.5, -11], [11.5, -11], [0, 12.5]];
+    const enterableIdx = ENTERABLE_BLOCKS[key];
+    spots.forEach(([ox, oz], k) => {
+      const wallC = HOUSE_WALLS[Math.floor(rand() * HOUSE_WALLS.length)];
+      const roofC = HOUSE_ROOFS[Math.floor(rand() * HOUSE_ROOFS.length)];
+      if (enterableIdx !== undefined && k === 0) {
+        enterableHouse(cx + ox, cz + oz, 10.5, 8.5, wallC, roofC, key, enterableIdx);
+        return;
+      }
+      simpleHouse(cx + ox, cz + oz, 8 + rand() * 3, 7 + rand() * 2.5, wallC, roofC, key);
+    });
+  }
+
+  // the beach bar by the pier approach (brief C): deck, posts,
+  // counter, stools, bottle shelf, thatch roof — and a framed door
+  // on its east face, where mission 1's checkpoint now lives.
+  function buildBeachBar() {
+    const bx = -234, bz = 60, w = 8, d = 6.5;
+    const deck = new THREE.Mesh(boxG(9.5, 0.18, 8),
+      new THREE.MeshStandardMaterial({ map: plankTex, roughness: 0.9 }));
+    deck.position.set(bx, 0.09, bz);
+    deck.receiveShadow = true;
+    group.add(deck);
+    const parts = [];
+    for (const [px, pz] of [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2]]) {
+      parts.push({ geo: xform(cylG(0.09, 0.11, 3.1, 7), bx + px, 1.55, bz + pz), color: 0x6a4a30 });
+    }
+    // counter (bartender west, stools east) + back shelf + bottles
+    parts.push({ geo: xform(boxG(4.6, 1.05, 0.5), bx - 0.8, 0.62, bz), color: 0x8a5a34 });
+    parts.push({ geo: xform(boxG(4.9, 0.08, 0.7), bx - 0.8, 1.18, bz), color: 0x5a3a20 });
+    parts.push({ geo: xform(boxG(0.35, 2.2, 4.6), bx - w / 2 + 0.35, 1.1, bz), color: 0x5a3a20 });
+    const bottleCols = [0x2e9e4a, 0xe76f51, 0x59e6ff, 0xf1c40f, 0xff5fa2];
+    for (let i = 0; i < 5; i++) {
+      parts.push({ geo: xform(boxG(0.16, 0.42, 0.16), bx - w / 2 + 0.62, 1.5, bz - 1.6 + i * 0.8), color: bottleCols[i] });
+    }
+    for (let i = 0; i < 3; i++) {
+      parts.push({ geo: xform(cylG(0.26, 0.26, 0.09, 10), bx + 0.6, 0.78, bz - 1.4 + i * 1.4), color: 0xb85a3a });
+      parts.push({ geo: xform(cylG(0.05, 0.05, 0.7, 6), bx + 0.6, 0.4, bz - 1.4 + i * 1.4), color: 0x4a3a28 });
+    }
+    // door frame on the east face
+    parts.push({ geo: xform(boxG(0.14, 2.3, 0.14), bx + w / 2, 1.15, bz - 0.75), color: 0xf0ead8 });
+    parts.push({ geo: xform(boxG(0.14, 2.3, 0.14), bx + w / 2, 1.15, bz + 0.75), color: 0xf0ead8 });
+    parts.push({ geo: xform(boxG(0.14, 0.16, 1.64), bx + w / 2, 2.36, bz), color: 0xf0ead8 });
+    const merged = new THREE.Mesh(mergeColored(parts), coloredMat());
+    merged.castShadow = true;
+    group.add(merged);
+    // the door itself, ajar against the frame
+    const door = new THREE.Mesh(boxG(0.07, 2.15, 1.3),
+      new THREE.MeshStandardMaterial({ color: 0x2a9d8f, roughness: 0.6 }));
+    door.position.set(bx + w / 2 - 0.62, 1.08, bz - 0.72);
+    door.rotation.y = 0.9;
+    group.add(door);
+    const roof = new THREE.Mesh(pyramidRoofGeo(),
+      new THREE.MeshStandardMaterial({ color: 0xc8a05a, roughness: 1, flatShading: true }));
+    roof.scale.set((w + 2.2) / 1.414, 1.8, (d + 2.2) / 1.414);
+    roof.position.set(bx, 4.0, bz);
+    roof.castShadow = true;
+    group.add(roof);
+    const sign = neonSign('BEACH BAR', '#59e6ff', 3.4);
+    sign.position.set(bx + w / 2 + 0.35, 2.7, bz);
+    sign.rotation.y = Math.PI / 2;
+    group.add(sign);
+    signs.push(sign);
+    // solid up to the counter; the deck + doorway stay walkable
+    const rect = { x0: bx - w / 2, z0: bz - d / 2, x1: bx + 1.6, z1: bz + d / 2 };
+    worldInfo.buildingRects.push(rect);
+    worldInfo.beachBar = { door: { x: bx + w / 2 + 1.5, z: bz }, rect };
+    worldInfo.doors.push({ x: bx + w / 2 + 0.1, z: bz, yaw: Math.PI / 2, block: 'beach', zone: 'beach' });
+  }
+
   // -- city blocks: buildings (vegetation + furniture come later,
   //    placed against the finished layout data) --
   const buildings = [];
@@ -360,8 +656,13 @@ export function buildWorld(scene, rand) {
         x1: cx + CFG.block / 2, z1: cz + CFG.block / 2, zone,
       });
       const palette = ZONE_COLORS[zone];
-      const nB = zone === 'downtown' ? 2 : (rand() < 0.5 ? 2 : 1);
       blockBuildings[bx + ',' + bz] = [];
+      // v6: suburb blocks are a residential district of houses now
+      if (zone === 'suburb') {
+        buildSuburbBlock(bx, bz, cx, cz);
+        continue;
+      }
+      const nB = zone === 'downtown' ? 2 : (rand() < 0.5 ? 2 : 1);
       for (let k = 0; k < nB; k++) {
         const w = 12 + rand() * 14, d = 12 + rand() * 14;
         let h = 8 + rand() * 10;
@@ -431,6 +732,65 @@ export function buildWorld(scene, rand) {
       // validated vegetation pass below — the old per-block scatter is
       // what put trees inside buildings and on roads (Jaka fixes #3/#4).
     }
+  }
+
+  // -- v6 post-pass: beach bar, merged houses, instanced doors -----
+  buildBeachBar();
+  if (houseWallParts.length) {
+    const hw = new THREE.Mesh(mergeColored(houseWallParts), coloredMat());
+    hw.castShadow = true;
+    hw.receiveShadow = true;
+    group.add(hw);
+    const hr = new THREE.Mesh(mergeColored(houseRoofParts), coloredMat());
+    hr.castShadow = true;
+    group.add(hr);
+    const ht = new THREE.Mesh(mergeColored(houseTrimParts), coloredMat());
+    ht.receiveShadow = true;
+    group.add(ht);
+  }
+  {
+    // every big building's door joins the same instanced pass as
+    // the simple houses' (doorSpots holds face-plane positions)
+    for (const key of Object.keys(blockBuildings)) {
+      const [bx, bz] = key.split(',').map(Number);
+      const zone = zoneAt(bx, bz);
+      for (const b of blockBuildings[key]) {
+        houseDoorSpot(b.x + b.w * 0.18, b.z - b.d / 2, Math.PI, key, zone);
+      }
+    }
+    const dummy = new THREE.Object3D();
+    const n = Math.max(1, doorSpots.length);
+    const frames = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1.34, 2.34, 0.1),
+      new THREE.MeshStandardMaterial({ color: 0xf0ead8, roughness: 0.7 }), n);
+    const panels = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1.12, 2.18, 0.07),
+      new THREE.MeshStandardMaterial({ color: 0x2a5a6a, roughness: 0.55 }), n);
+    const knobs = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.05, 8, 6),
+      new THREE.MeshStandardMaterial({ color: 0xd8a030, roughness: 0.35, metalness: 0.7 }), n);
+    doorSpots.forEach((ds, i) => {
+      dummy.rotation.set(0, ds.yaw, 0);
+      dummy.position.set(ds.x, 1.17, ds.z - 0.05);
+      dummy.updateMatrix();
+      frames.setMatrixAt(i, dummy.matrix);
+      dummy.position.set(ds.x, 1.09, ds.z - 0.1);
+      dummy.updateMatrix();
+      panels.setMatrixAt(i, dummy.matrix);
+      dummy.position.set(ds.x + 0.38, 1.05, ds.z - 0.16);
+      dummy.updateMatrix();
+      knobs.setMatrixAt(i, dummy.matrix);
+    });
+    frames.count = doorSpots.length;
+    panels.count = doorSpots.length;
+    knobs.count = doorSpots.length;
+    frames.instanceMatrix.needsUpdate = true;
+    panels.instanceMatrix.needsUpdate = true;
+    knobs.instanceMatrix.needsUpdate = true;
+    frames.frustumCulled = false;
+    panels.frustumCulled = false;
+    knobs.frustumCulled = false;
+    group.add(frames, panels, knobs);
   }
 
   // -- v3 TREES (Jaka fixes #1/#3/#4): ONE natural tree family — a
@@ -1078,19 +1438,25 @@ export function buildWorld(scene, rand) {
         ctx.beginPath(); ctx.moveTo(x + h, 0); ctx.lineTo(x, h); ctx.stroke();
       }
     });
-    const fence = new THREE.Mesh(
-      new THREE.PlaneGeometry(360, 1.2),
-      new THREE.MeshBasicMaterial({
-        map: fenceTex, transparent: true, side: THREE.DoubleSide,
-        depthWrite: false,
-      })
-    );
-    fenceTex.repeat.set(30, 1);
-    // v3 audit: x=-218 stood ON the avenue's west lane (avenue spans
-    // -220..-200) — the fence belongs on the sand side of the promenade
-    fence.position.set(-HALF - 12.9, 0.7, 0);
-    fence.rotation.y = Math.PI / 2;
-    group.add(fence);
+    // v6 (brief C): the fence now has a GATE GAP at the pier / beach
+    // bar approach (z 53..67) — v5 fenced the mission spot shut.
+    const mkFence = (z0, z1) => {
+      const len = z1 - z0;
+      const t = fenceTex.clone();
+      t.needsUpdate = true;
+      t.repeat.set(len / 12, 1);
+      const f = new THREE.Mesh(new THREE.PlaneGeometry(len, 1.2),
+        new THREE.MeshBasicMaterial({
+          map: t, transparent: true, side: THREE.DoubleSide, depthWrite: false,
+        }));
+      // v3 audit: x=-218 stood ON the avenue's west lane (avenue spans
+      // -220..-200) — the fence belongs on the sand side of the promenade
+      f.position.set(-HALF - 12.9, 0.7, (z0 + z1) / 2);
+      f.rotation.y = Math.PI / 2;
+      group.add(f);
+    };
+    mkFence(-180, 53);
+    mkFence(67, 180);
   }
 
   // gang territory in world coords (for minimap tint + staging)

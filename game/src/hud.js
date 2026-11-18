@@ -59,6 +59,132 @@ export class HUD {
     mk('hud-phone', 'hud phone', '');
     // crosshair
     mk('hud-cross', 'hud cross', '+');
+    // v6: aim-mode indicator (AUTO lock-on / MANUAL crosshair)
+    mk('hud-aim', 'hud aim', '');
+    // v6: lock-on tag under the crosshair while AUTO has a target
+    const lock = mk('hud-lock', 'hud locktag', '⌖ LOCK');
+    lock.style.display = 'none';
+    // v6 presentation (brief N): mission title card, CHECKPOINT
+    // banner, district splash, floating money popup, SAVED toast
+    mk('hud-titlecard', 'hud titlecard', '');
+    mk('hud-banner', 'hud banner', '');
+    mk('hud-splash', 'hud splash', '');
+    mk('hud-money', 'hud moneypop', '');
+    mk('hud-toast', 'hud toast', '');
+    this.buildDialogue();
+  }
+  // Mama Rosa's portrait dialogue card: canvas portrait (painted
+  // once), name, line, NEXT / SKIP buttons. The world keeps idling
+  // behind it — it is a card, not a modal.
+  buildDialogue() {
+    const card = document.createElement('div');
+    card.id = 'hud-dialogue';
+    card.className = 'hud dialogue';
+    card.style.display = 'none';
+    const cv = document.createElement('canvas');
+    cv.width = 96; cv.height = 96;
+    cv.className = 'dlg-portrait';
+    const c = cv.getContext('2d');
+    // golden backdrop, face, dark hair bun, gold earring, smile
+    const g = c.createRadialGradient(48, 40, 6, 48, 48, 52);
+    g.addColorStop(0, '#ffd9a0'); g.addColorStop(1, '#e2703a');
+    c.fillStyle = g; c.fillRect(0, 0, 96, 96);
+    c.fillStyle = '#8a5a3a';
+    c.beginPath(); c.arc(48, 52, 21, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#2a1a10';
+    c.beginPath(); c.arc(48, 36, 22, Math.PI, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(48, 17, 8, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#26211c';
+    c.beginPath(); c.arc(41, 50, 2.6, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(55, 50, 2.6, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = '#26211c'; c.lineWidth = 2.4; c.lineCap = 'round';
+    c.beginPath(); c.arc(48, 57, 9, Math.PI * 0.2, Math.PI * 0.8); c.stroke();
+    c.fillStyle = '#d8a030';
+    c.beginPath(); c.arc(71, 58, 3.4, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#b84a1a';
+    c.fillRect(20, 82, 56, 14);
+    card.appendChild(cv);
+    const body = document.createElement('div');
+    body.className = 'dlg-body';
+    body.innerHTML = '<b id="dlg-name">MAMA ROSA</b><span id="dlg-text"></span>';
+    card.appendChild(body);
+    const btns = document.createElement('div');
+    btns.className = 'dlg-btns';
+    const next = document.createElement('button');
+    next.id = 'dlg-next'; next.type = 'button'; next.textContent = 'NEXT ▸';
+    const skip = document.createElement('button');
+    skip.id = 'dlg-skip'; skip.type = 'button'; skip.textContent = 'SKIP';
+    btns.appendChild(next); btns.appendChild(skip);
+    card.appendChild(btns);
+    this.root.appendChild(card);
+    this.el['hud-dialogue'] = card;
+    this.dlgText = card.querySelector('#dlg-text');
+    this.dlgName = card.querySelector('#dlg-name');
+    const done = (skipped) => {
+      card.style.display = 'none';
+      clearTimeout(this._dlgT);
+      const cb = this._dlgCb;
+      this._dlgCb = null;
+      if (cb) cb(skipped);
+    };
+    next.addEventListener('click', () => done(false));
+    skip.addEventListener('click', () => done(true));
+    this._dlgDone = done;
+  }
+  showDialogue(name, text, cb) {
+    this.dlgName.textContent = name;
+    this.dlgText.textContent = text;
+    this._dlgCb = cb || null;
+    this.el['hud-dialogue'].style.display = 'flex';
+    clearTimeout(this._dlgT);
+    this._dlgT = setTimeout(() => this._dlgDone && this._dlgDone(true), 14000);
+  }
+  hideDialogue() { if (this._dlgDone) this._dlgDone(true); }
+  titleCard(name, sub = '') {
+    const el = this.el['hud-titlecard'];
+    el.innerHTML = '<b>' + name + '</b>' + (sub ? '<span>' + sub + '</span>' : '');
+    el.classList.add('show');
+    clearTimeout(this._tcT);
+    this._tcT = setTimeout(() => el.classList.remove('show'), 3000);
+  }
+  banner(text) {
+    const el = this.el['hud-banner'];
+    el.textContent = text;
+    el.classList.add('show');
+    clearTimeout(this._bnT);
+    this._bnT = setTimeout(() => el.classList.remove('show'), 1800);
+  }
+  splash(name) {
+    const el = this.el['hud-splash'];
+    el.textContent = name;
+    el.classList.add('show');
+    clearTimeout(this._spT);
+    this._spT = setTimeout(() => el.classList.remove('show'), 2400);
+  }
+  moneyPopup(amount) {
+    const el = this.el['hud-money'];
+    el.textContent = '+$' + Math.floor(amount).toLocaleString('en-US');
+    el.classList.remove('pop');
+    void el.offsetWidth;   // restart the CSS animation
+    el.classList.add('pop');
+  }
+  toast(text) {
+    const el = this.el['hud-toast'];
+    el.textContent = text;
+    el.classList.add('show');
+    clearTimeout(this._tsT);
+    this._tsT = setTimeout(() => el.classList.remove('show'), 1600);
+  }
+  setAimMode(mode) {
+    this.aimMode = mode;
+    this.el['hud-aim'].textContent = mode === 'auto' ? '⌖ AIM: AUTO' : '✛ AIM: MANUAL';
+    this.el['hud-aim'].style.display = 'block';
+    // the crosshair belongs to MANUAL; AUTO shows the lock ring
+    const armed = this._weapon && this._weapon !== 'fists';
+    this.el['hud-cross'].style.display = (armed && mode === 'manual') ? 'block' : 'none';
+  }
+  setLockTag(on) {
+    this.el['hud-lock'].style.display = on ? 'block' : 'none';
   }
   setCash(n) { this.el['hud-cash'].textContent = '$' + Math.floor(n).toLocaleString('en-US'); }
   setClock(minutes) {
@@ -87,11 +213,20 @@ export class HUD {
     this.el['hud-stars'].innerHTML = s;
     this.el['hud-stars'].classList.toggle('hot', n >= 3);
   }
-  setWeapon(w, ammo) {
-    this.el['hud-weapon'].textContent =
-      w === 'pistol' ? '🔫 PISTOL · ' + ammo : '👊 FISTS';
-    // crosshair only when aiming the pistol
-    this.el['hud-cross'].style.display = w === 'pistol' ? 'block' : 'none';
+  setWeapon(w, ammo, reserve) {
+    // v6: the whole arsenal reads here — name, magazine, reserve,
+    // and the crosshair follows the aim mode (MANUAL only)
+    const LABELS = {
+      fists: '👊 FISTS', pistol: '🔫 PISTOL', heavy: '🔫 HEAVY PISTOL',
+      smg: '🔫 SMG', shotgun: '🔫 SHOTGUN', rifle: '🔫 RIFLE',
+    };
+    this._weapon = w;
+    this.el['hud-weapon'].textContent = w === 'fists'
+      ? LABELS.fists
+      : (LABELS[w] || w) + ' · ' + ammo + (reserve != null ? ' / ' + reserve : '');
+    const armed = w !== 'fists';
+    this.el['hud-cross'].style.display =
+      (armed && this.aimMode !== 'auto') ? 'block' : 'none';
   }
   setObjective(text) {
     this.el['hud-objective'].innerHTML = text ? '🎯 ' + text : '';
@@ -175,7 +310,7 @@ export class HUD {
     setTimeout(() => { if (msg.parentNode) msg.parentNode.removeChild(msg); }, 6000);
   }
   // --- minimap: same layout data as the 3D city ---
-  drawMinimap(player, policeCars, missionTarget, chaseCar) {
+  drawMinimap(player, policeCars, missionTarget, chaseCar, pickups) {
     const ctx = this.mmCtx;
     const S = 190, HALF = 210, scale = S / (HALF * 2 + 60);
     ctx.clearRect(0, 0, S, S);
@@ -215,6 +350,25 @@ export class HUD {
       const [, y] = toMap(0, c);
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, S); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(S, y); ctx.stroke();
+    }
+    // v6: pickup blips — cyan diamonds for weapons, green crosses
+    // for health — so hidden gear is findable from the map
+    if (pickups) {
+      for (const pk of pickups) {
+        const [kx, ky] = toMap(pk.x, pk.z);
+        if (pk.kind === 'health') {
+          ctx.fillStyle = '#3dff7a';
+          ctx.fillRect(kx - 1.5, ky - 4.5, 3, 9);
+          ctx.fillRect(kx - 4.5, ky - 1.5, 9, 3);
+        } else {
+          ctx.fillStyle = '#59e6ff';
+          ctx.save();
+          ctx.translate(kx, ky);
+          ctx.rotate(Math.PI / 4);
+          ctx.fillRect(-3, -3, 6, 6);
+          ctx.restore();
+        }
+      }
     }
     // mission marker
     if (missionTarget) {

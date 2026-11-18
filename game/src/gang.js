@@ -8,14 +8,14 @@
 // the officer's cap are sized to the cylindrical minifig head, and the
 // officer's badge lives in the printed torso plate now.
 const THREE = window.THREE;
-import { PALETTE } from './config.js';
+import { PALETTE, gameRand } from './config.js';
 import { makePerson, attachWeapon } from './people.js';
 
 export function makeGangMember(withRifle) {
   const p = makePerson(
     PALETTE.gangGreen,
     0x2c3e50,
-    PALETTE.skinTones[Math.floor(Math.random() * PALETTE.skinTones.length)],
+    PALETTE.skinTones[Math.floor(gameRand() * PALETTE.skinTones.length)],
     { print: 'gang', noStud: true }
   );
   // green bandana: a band around the cylindrical head

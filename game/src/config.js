@@ -121,7 +121,7 @@ export const CFG = {
   trafficCount: 26,
   pedCount: 30,
   wantedMax: 5,
-  missionReward: [400, 650, 900, 1200, 2500],
+  missionReward: [400, 550, 650, 900, 1000, 1200, 2500],
   startCash: 120,
   playerHealth: 100,
   // gang turf on the map (block coords bx 5..6, bz 1..2) — green tint
@@ -155,6 +155,13 @@ export function rng(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// v6/v7 (skill: Fixed-Timestep & Seeded RNG): ONE seeded stream for
+// all GAMEPLAY randomness (weapon spread, NPC hit rolls, brawl
+// timing, impact scatter) — never Math.random in sim code, so a
+// play-test run is reproducible. World generation keeps its own
+// seed-parameter stream in main.
+export const gameRand = rng(0x9E3779);
 
 export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 export const lerp = (a, b, t) => a + (b - a) * t;

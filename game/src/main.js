@@ -15,15 +15,16 @@
 const THREE = window.THREE;
 import { CFG, PALETTE, SCALE, rng, clamp, lerp, TAU } from './config.js';
 import { buildWorld, roadCoord, nearestRoadCoord, onRoad, worldInfo } from './world.js';
-import { Traffic, spawnParked, heroCar, makeCar, setBrake, rollWheels, steerWheels, carPersonHit } from './vehicles.js';
-import { Pedestrians, heroPerson, attachWeapon, updateKnock } from './people.js';
+import { Traffic, spawnParked, heroCar, makeCar, setBrake, rollWheels, steerWheels, carPersonHit, damageVehicle, damageStage, setCarWreck, restoreCar } from './vehicles.js';
+import { Pedestrians, heroPerson, attachWeapon, updateKnock, hurtPerson, startBrawl, stopBrawl, updateBrawl, makePerson, makeWeaponMesh } from './people.js';
 import { Police } from './police.js';
 import { Missions, MISSION_DEFS } from './missions.js';
-import { Combat, Health } from './combat.js';
+import { Combat, Health, WEAPONS, WEAPON_ORDER } from './combat.js';
 import { HUD } from './hud.js';
 import { AudioSys } from './audio.js';
 import { Flock, Clouds, DogFollower, CrossingCat } from './life.js';
 import { stageGang, stageBusted } from './gang.js';
+import { Explosion, SkidMarks, glowSprite } from './effects.js';
 
 const SAVE_KEY = 'palmbay-heat-save-v1';
 const params = new URLSearchParams(location.search);
@@ -126,8 +127,19 @@ function updateSun(playerPos) {
 }
 
 // ---------- world ----------
-const { group: cityGroup, signs } = buildWorld(scene, rand);
+const { group: cityGroup, buildings, signs } = buildWorld(scene, rand);
 const sea = cityGroup.userData.sea;
+
+// v6 (brief C + N): mission anchors come from the BUILT world —
+// mission 1's checkpoint is the beach bar's door; the SPECIAL
+// DELIVERY drop is Mama Rosa's own front door (block 3,3).
+if (worldInfo.beachBar) {
+  MISSION_DEFS[0].target = [worldInfo.beachBar.door.x, worldInfo.beachBar.door.z];
+}
+{
+  const dinerDoor = worldInfo.doors.find((d) => d.block === '3,3');
+  if (dinerDoor) MISSION_DEFS[4].target = [dinerDoor.x, dinerDoor.z - 0.5];
+}
 
 // ---------- entities ----------
 const traffic = new Traffic(scene, rand);
@@ -189,6 +201,111 @@ chaseTarget.userData.speed = 0;
 chaseTarget.visible = false;
 scene.add(chaseTarget);
 
+// ================= v6 systems =====================================
+// aim: AUTO lock-on is the touch default, MANUAL the desktop one
+combat.aimMode = IS_TOUCH ? 'auto' : 'manual';
+combat.occluders = buildings;
+// police return fire + fists run through combat's FX (briefs F/M)
+police.fx = combat;
+police.playerRef = player;
+police.onPlayerShot = (dmg) => {
+  if (state.mode !== 'playing') return;
+  if (state.inCar) {
+    damageCarFromHit(car, dmg * 0.8);
+    if (health.damage(dmg * 0.35)) { showEnd('wasted'); return; }
+  } else if (health.damage(dmg)) { showEnd('wasted'); return; }
+  syncHUD();
+};
+
+// the Palm Bay Greens: a standing gang on the turf corner — idle
+// until provoked, then the riflemen shoot and the rest brawl (M)
+const gangGroup = stageGang(scene, [
+  { x: 98, z: -52, heading: Math.PI * 0.75, rifle: true },
+  { x: 101, z: -49, heading: Math.PI * 0.6, rifle: true },
+  { x: 95, z: -48, heading: Math.PI * 0.9, rifle: false },
+  { x: 99, z: -55, heading: Math.PI * 0.5, rifle: false },
+  { x: 103, z: -53, heading: Math.PI * 0.8, rifle: true },
+]);
+const gangMembers = gangGroup.children.slice();
+
+// the follow-mission courier (brief N): a walker with a ledger
+const courier = makePerson(0xf1c40f, 0x2c3e50, 0x8a5a3a, { print: 'civil', printVariant: 3, hair: true, hairColor: 0x111111 });
+courier.visible = false;
+scene.add(courier);
+const COURIER_ROUTE = [
+  { x: 38.45, z: -90 }, { x: 38.45, z: -58 },
+  { x: 38.45, z: -24 }, { x: 38.45, z: 14 },
+];
+let courierWp = 0;
+
+// shared v6 FX pools
+const explosion = new Explosion(scene);
+const skidMarks = new SkidMarks(scene);
+
+// ---------- pickups (briefs L + N) ---------------------------------
+const pickups = [];
+function findOpenSpot(x, z) {
+  // spiral out until the point clears every building footprint
+  for (let r = 0; r < 30; r += 2) {
+    for (let a = 0; a < 8; a++) {
+      const px = x + Math.cos(a * Math.PI / 4) * r;
+      const pz = z + Math.sin(a * Math.PI / 4) * r;
+      const inside = worldInfo.buildingRects.some((rc) =>
+        px > rc.x0 - 1 && px < rc.x1 + 1 && pz > rc.z0 - 1 && pz < rc.z1 + 1);
+      if (!inside) return { x: px, z: pz };
+    }
+  }
+  return { x, z };
+}
+function makePickup(kind, weapon, x, z) {
+  const g = new THREE.Group();
+  const isHealth = kind === 'health';
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.85, 0.07, 8, 24),
+    new THREE.MeshBasicMaterial({ color: isHealth ? 0x3dff7a : 0x59e6ff })
+  );
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.25;
+  g.add(ring);
+  let icon;
+  if (isHealth) {
+    icon = new THREE.Group();
+    const cm = new THREE.MeshBasicMaterial({ color: 0x2ecc71 });
+    const v = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.66, 0.22), cm);
+    const h = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.22, 0.22), cm);
+    icon.add(v, h);
+  } else {
+    icon = makeWeaponMesh(weapon);
+    icon.scale.setScalar(1.6);
+  }
+  icon.position.y = 0.95;
+  g.add(icon);
+  const glow = glowSprite(isHealth ? 0x3dff7a : 0x59e6ff, 2.4, 0.5);
+  glow.position.y = 0.9;
+  g.add(glow);
+  g.position.set(x, 0, z);
+  scene.add(g);
+  const pk = { kind, weapon, group: g, icon, ring, x, z, hx: x, hz: z, taken: false, respawnT: 0 };
+  pickups.push(pk);
+  return pk;
+}
+{
+  // weapons hidden across the city (brief L)
+  const h0 = worldInfo.houses[0];
+  if (h0) makePickup('weapon', 'smg', h0.pickupSpot.x, h0.pickupSpot.z);   // inside a house
+  makePickup('weapon', 'shotgun', -226, 88);                               // the beach
+  const alley = findOpenSpot(-32, -97);
+  makePickup('weapon', 'rifle', alley.x, alley.z);                         // downtown blocks
+  const harbor = findOpenSpot(188, 152);
+  makePickup('weapon', 'heavy', harbor.x, harbor.z);                       // the harbor
+  // health (brief N): green-cross rings
+  makePickup('health', null, -198.5, -120);
+  const hA = findOpenSpot(36, 96); makePickup('health', null, hA.x, hA.z);
+  const hB = findOpenSpot(150, 150); makePickup('health', null, hB.x, hB.z);
+  const hC = findOpenSpot(-30, -157); makePickup('health', null, hC.x, hC.z);
+  makePickup('health', null, 96, -20);
+}
+
 // ---------- HUD ----------
 const hud = new HUD(document.getElementById('hud'));
 
@@ -218,6 +335,23 @@ const state = {
   footSpeed: 0,       // v3: real on-foot speed for the bust meter
   stolenCar: null,    // v3: the parked car currently swapped out
   heroMax: 0,         // v3: hero top speed to restore after a steal
+  // v6 additions
+  footVel: { x: 0, z: 0 },   // acceleration-based on-foot velocity (D)
+  firing: false,             // trigger held (auto weapons keep firing)
+  punchT: 0,                 // player punch swing timer (M)
+  gangAggroT: 0,             // seconds of gang hostility left
+  district: '',              // last district splashed (N)
+  splashT: 0,
+  pendingBooms: [],          // chained explosions: {car, t, dmg}
+  // v7 (upgraded skill) additions
+  trauma: 0,                 // screen-shake trauma 0..1 (applied as trauma²)
+  shake: 0,                  // last applied shake amplitude (trauma²)
+  hitstop: 0,                // seconds of hitstop left (sim runs at 12%)
+  nanRecoveries: 0,          // NaN guard trips (deep-testing hook)
+  // v7 input snapshot: listeners write keys/stick; readInput()
+  // shapes them ONCE per frame into these axes and the sim only
+  // ever reads this object (stable shape, no per-frame allocation)
+  input: { ax: 0, ay: 0, mag: 0, stick: false, run: false, brake: false },
 };
 let saveData = loadSave();
 
@@ -233,6 +367,12 @@ function writeSave() {
     missionsDone: state.missionsDone,
     x: player.position.x, z: player.position.z,
     health: health.hp, wanted: police.wanted,
+    // v6 (brief N): the arsenal persists too
+    weapons: {
+      owned: [...combat.owned], mags: combat.mags,
+      reserves: combat.reserves, aimMode: combat.aimMode,
+      weapon: combat.weapon,
+    },
     when: Date.now(),
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch {}
@@ -272,6 +412,71 @@ function collideBuildings(pos, radius) {
   return moved;
 }
 
+// ---------- v6 vehicle damage + explosions (brief G) -------------
+const _boomV = new THREE.Vector3();
+function explodeCar(c) {
+  if (c.userData.exploded) return;
+  const wasStolenBody = (c === car && state.stolenCar);
+  setCarWreck(c);
+  if (wasStolenBody) setCarWreck(state.stolenCar);
+  explosion.boom(c.position, 1);
+  combat.sparks.burst(_boomV.set(c.position.x, 1, c.position.z), 42);
+  for (let i = 0; i < 5; i++) {
+    combat.smoke.puff(_boomV.set(
+      c.position.x + (rand() - 0.5) * 2, 1 + rand(), c.position.z + (rand() - 0.5) * 2
+    ), 0.9, 0x2a2a2a);
+  }
+  audio.noise(0.5, 0.5, 300);
+  // a traffic wreck stops being traffic (the hulk stays in the world)
+  const ti = traffic.cars.indexOf(c);
+  if (ti >= 0) traffic.cars.splice(ti, 1);
+  // radial damage: people, the player, and nearby cars (chained)
+  const hurtNear = (p, isPlayer) => {
+    const d = Math.hypot(p.position.x - c.position.x, p.position.z - c.position.z);
+    if (d > 5) return;
+    const dmg = 40 + (1 - d / 5) * 20;   // 40-60 inside 4-5 m
+    if (isPlayer) {
+      if (!state.inCar && health.damage(dmg)) showEnd('wasted');
+    } else hurtPerson(p, dmg, c.position.x, c.position.z);
+  };
+  for (const p of peds.peds) hurtNear(p, false);
+  for (const m of gangMembers) hurtNear(m, false);
+  if (!state.inCar) hurtNear(player, true);
+  const all = [car, chaseTarget, ...parked, ...traffic.cars, ...police.cars];
+  for (const oc of all) {
+    if (oc === c || oc.userData.exploded || !oc.visible) continue;
+    const d = Math.hypot(oc.position.x - c.position.x, oc.position.z - c.position.z);
+    if (d < 5.5) {
+      state.pendingBooms.push({ car: oc, t: 0.45, dmg: oc.userData.maxHp * 0.5 });
+    }
+  }
+  // camera shake by proximity + eject the player from a burning wreck
+  const pd = Math.hypot(
+    (state.inCar ? car.position.x : player.position.x) - c.position.x,
+    (state.inCar ? car.position.z : player.position.z) - c.position.z);
+  addTrauma(clamp(1.25 - pd * 0.045, 0.3, 0.9));
+  if (pd < 14) addHitstop(0.09);       // v7: explosions get the full 90 ms
+  audio.duck();
+  if (c === car && state.inCar && !state.transition) {
+    if (health.damage(18)) { showEnd('wasted'); return; }
+    startExit();
+    hud.center('MOBIL MELEDAK!', 'Keluar — cepat!');
+  }
+}
+function damageCarFromHit(c, dmg) {
+  if (!c || c.userData.exploded) return;
+  if (damageVehicle(c, dmg)) explodeCar(c);
+}
+
+// v7 feel numbers: hitstop (30-90 ms) + trauma-based shake.
+// Hitstop runs the sim at ~12% speed briefly — impacts READ.
+function addHitstop(s) {
+  state.hitstop = Math.max(state.hitstop, Math.min(s, 0.09));
+}
+function addTrauma(amount) {
+  state.trauma = clamp(state.trauma + amount, 0, 1);
+}
+
 // ---------- title screen ----------
 const titleEl = document.getElementById('title');
 const titleContinue = document.getElementById('btn-continue');
@@ -281,6 +486,10 @@ const endEl = document.getElementById('endscreen');
 const endTitle = document.getElementById('end-title');
 const endText = document.getElementById('end-text');
 const pauseEl = document.getElementById('pause');
+// v6 (brief E): pause-menu aim toggle + resume buttons
+document.getElementById('btn-aim').addEventListener('click', () => toggleAimMode());
+document.getElementById('btn-resume').addEventListener('click', () => togglePause());
+hud.setAimMode(combat.aimMode);
 
 function showTitle() {
   state.mode = 'title';
@@ -291,7 +500,7 @@ function showTitle() {
   pauseEl.classList.add('hidden');
   titleContinue.style.display = saveData ? 'block' : 'none';
   document.getElementById('save-line').textContent = saveData
-    ? 'Save: $' + saveData.cash + ' · Misi ' + (saveData.missionIndex + 1) + '/5 · ' +
+    ? 'Save: $' + saveData.cash + ' · Misi ' + (saveData.missionIndex + 1) + '/' + MISSION_DEFS.length + ' · ' +
       new Date(saveData.when).toLocaleDateString()
     : 'Belum ada save.';
 }
@@ -307,12 +516,27 @@ function startGame(fromSave) {
   // the previous session's police cars and a stale in-car flag
   police.clear();
   state.inCar = false;
+  state.transition = null;
+  state.exitPending = false;
+  state.gangAggroT = 0;
   player.visible = true;
+  // v6: wrecks from a previous run are repaired on a fresh start
+  for (const c of [car, chaseTarget, ...parked]) if (c.userData.exploded) restoreCar(c);
+  car.userData.hp = car.userData.maxHp;
   if (fromSave && saveData) {
     state.cash = saveData.cash;
     state.missionsDone = saveData.missionsDone || 0;
     health.hp = saveData.health || CFG.playerHealth;
     player.position.set(saveData.x || 30, 0, saveData.z || 30);
+    // v6: restore the arsenal
+    if (saveData.weapons) {
+      const w = saveData.weapons;
+      combat.owned = new Set(w.owned || ['fists', 'pistol']);
+      Object.assign(combat.mags, w.mags || {});
+      Object.assign(combat.reserves, w.reserves || {});
+      combat.aimMode = w.aimMode || combat.aimMode;
+      combat.setWeapon('fists');
+    }
     missions.start(saveData.missionIndex || 0);
     hud.phone('MAMA ROSA', 'Selamat datang kembali, Dario. Kerjaan menunggumu.');
   } else {
@@ -337,6 +561,28 @@ titleContinue.addEventListener('click', () => startGame(true));
 document.getElementById('btn-retry').addEventListener('click', () => {
   health.hp = CFG.playerHealth;
   police.clear();
+  if (car.userData.exploded) restoreCar(car);
+  car.userData.hp = car.userData.maxHp;
+  // v6: a retry also climbs out of any car state (v6 can waste
+  // Dario at the wheel — police fire, explosions)
+  if (state.stolenCar) {
+    const c = state.stolenCar;
+    c.visible = true;
+    if (c.userData.jacked) {
+      c.userData.jacked = false;
+      c.userData.speed = c.userData.maxSpeed;
+      if (!traffic.cars.includes(c)) traffic.cars.push(c);
+    } else {
+      c.userData.parked = true;
+      c.userData.stolen = false;
+    }
+    state.stolenCar = null;
+    car.userData.maxSpeed = state.heroMax || CFG.carMax;
+  }
+  state.inCar = false;
+  state.transition = null;
+  state.exitPending = false;
+  player.visible = true;
   player.position.set(40.5, 0, 38.45);
   state.heading = Math.PI / 2;
   state.camYaw = -Math.PI / 2;
@@ -354,28 +600,45 @@ titleQuit.addEventListener('click', () => {
 });
 
 // ---------- missions events ----------
+// v6 (brief N): every mission opens with Mama Rosa's portrait
+// dialogue card + a mission title card, and closes with SUCCESS,
+// a floating +$ popup and a SAVED toast.
+const ROSA_POST = {
+  1: 'Paketnya aman. Kerja bagus, sayang.',
+  2: 'Kamu mengikutinya seperti bayangan. Ledger-nya aman.',
+  3: 'Sedan biru itu tidak akan mengganggu kita lagi.',
+  4: 'Tepat waktu! Begitu cara Palm Bay bekerja.',
+  5: 'Kratnya utuh. Dario, kamu memang bisa diandalkan.',
+  6: 'Polisi kehilangan jejakmu. Dinginkan kepala malam ini.',
+  7: 'Selesai. Palm Bay berutang padamu, Dario.',
+};
 missions.onEvent = (type, payload) => {
   if (type === 'start') {
     hud.setObjective(payload.name + ' — ' + payload.brief);
     hud.setZone(payload.zone || '');
-    hud.phone('MAMA ROSA', payload.brief);
+    hud.titleCard(payload.name, 'MISI ' + (missions.index + 1) + ' / ' + MISSION_DEFS.length);
+    hud.showDialogue('MAMA ROSA', payload.brief);
     audio.play('mission');
     // v3 audit: HEAT ESCAPE's brief promises 3 stars, but nothing
     // ever raised them — and the completion check (wanted 0, heat 0)
     // was already true, so the mission completed instantly for free
     if (payload.escape) police.setWanted(3);
+    if (payload.follow) resetCourier();
+    if (payload.delivery) hud.banner('CHECKPOINT — ANTAR KE PINTU MAMA ROSA');
   } else if (type === 'complete') {
     state.cash += payload.reward;
     state.missionsDone += 1;
     audio.play('cash');
-    hud.center('MISI SELESAI', '+$' + payload.reward + ' · ' + payload.name);
-    hud.phone('MAMA ROSA', 'Bagus, Dario. $' + payload.reward + ' sudah masuk.');
+    hud.titleCard('SUCCESS', payload.name);
+    hud.moneyPopup(payload.reward);
+    hud.showDialogue('MAMA ROSA', ROSA_POST[payload.id] || 'Kerja bagus, Dario.');
     writeSave();
+    hud.toast('💾 SAVED');
     setTimeout(() => {
       const next = missions.next();
       if (!next) {
-        hud.center('PALM BAY HEAT — TAMAT', 'Semua 5 misi selesai. Kota ini milikmu, Dario.');
-        hud.phone('MAMA ROSA', 'Kamu legenda Palm Bay sekarang.');
+        hud.titleCard('PALM BAY HEAT — TAMAT', 'Semua ' + MISSION_DEFS.length + ' misi selesai');
+        hud.showDialogue('MAMA ROSA', 'Kamu legenda Palm Bay sekarang.');
       }
     }, 1800);
   } else if (type === 'fail') {
@@ -393,17 +656,51 @@ missions.onEvent = (type, payload) => {
     // story complete
   }
 };
+// the courier starts his walk when the FOLLOW mission does
+function resetCourier() {
+  courierWp = 0;
+  courier.position.set(COURIER_ROUTE[0].x, 0, COURIER_ROUTE[0].z);
+  courier.visible = true;
+  courier.userData.dead = false;
+  courier.userData.hp = 100;
+  missions.followPos = courier.position;
+  missions.followDone = false;
+}
 
 // ---------- input ----------
 function togglePause() {
-  if (state.mode === 'playing') { state.mode = 'paused'; pauseEl.classList.remove('hidden'); }
+  if (state.mode === 'playing') {
+    state.mode = 'paused';
+    pauseEl.classList.remove('hidden');
+    // v6: the aim toggle always shows the live mode
+    const b = document.getElementById('btn-aim');
+    if (b) b.textContent = '⌖ AIM: ' + (combat.aimMode === 'auto' ? 'AUTO' : 'MANUAL');
+  }
   else if (state.mode === 'paused') { state.mode = 'playing'; pauseEl.classList.add('hidden'); }
 }
 function playerMelee() {
   if (state.mode !== 'playing' || state.inCar) return;
-  combat.melee(player.position, state.heading, peds.peds, (p) => {
-    peds.fleeFrom(p.position.x, p.position.z, 12);
+  state.punchT = 0.22;
+  audio.ensure();
+  combat.melee(player.position, state.heading, peds.peds.concat(gangMembers), (p) => {
+    // v6 (brief M): a solid punch — the victim staggers, and most
+    // fight BACK (brawl); the rest run, and the losing run
+    addHitstop(0.045);
+    const res = hurtPerson(p, WEAPONS.fists.dmg, player.position.x, player.position.z);
     police.addWanted(1);
+    if (gangMembers.includes(p)) state.gangAggroT = 25;
+    if (res === 'dead') return;
+    if (p.userData.hp < 30 || rand() < 0.3) {
+      peds.fleeFrom(p.position.x, p.position.z, 14);
+      return;
+    }
+    startBrawl(p, player, () => {
+      if (state.mode !== 'playing' || state.inCar) return;
+      audio.play('punch');
+      addHitstop(0.04);
+      if (health.damage(3 + rand() * 3)) showEnd('wasted');
+      syncHUD();
+    });
   });
 }
 function playerShoot() {
@@ -412,31 +709,65 @@ function playerShoot() {
   // v3 audit: the city is a raycast target too — shots now stop at
   // walls instead of passing through buildings to hit peds behind
   // them, and only a person (or the chase car) raises the heat
-  const res = combat.shoot(camera, [peds.group, chaseTarget, cityGroup], (obj) => {
-    if (obj === chaseTarget || (obj.userData && obj.userData.isPerson)) {
+  // v6: gang, traffic, police and parked cars are targets too, and
+  // cars take real bullet damage (brief G)
+  const officerPersons = police.officers.map((o) => o.person);
+  const res = combat.shoot(camera, [
+    peds.group, gangGroup, chaseTarget, cityGroup,
+    traffic.group, police.group, ...officerPersons, ...parked,
+  ], (obj, point, st) => {
+    if (obj.userData && obj.userData.isPerson) {
+      const res = hurtPerson(obj, st.dmg, player.position.x, player.position.z);
       peds.fleeFrom(player.position.x, player.position.z, 20);
       police.addWanted(1);
+      if (gangMembers.includes(obj)) state.gangAggroT = 25;
+      if (res !== 'dead' && obj.userData.hp < 30) peds.fleeFrom(obj.position.x, obj.position.z, 14);
+    } else if (obj === chaseTarget) {
+      damageCarFromHit(chaseTarget, 6 + st.dmg * 0.12);
+      peds.fleeFrom(player.position.x, player.position.z, 20);
+      police.addWanted(1);
+    } else if (obj.userData && obj.userData.style) {
+      damageCarFromHit(obj, 6 + st.dmg * 0.12);
+      if (police.cars.includes(obj)) police.addWanted(1);
     }
   });
+  // a gunshot in the turf provokes the gang even on a miss
+  const gt = worldInfo.gangTurf;
+  if (gt && player.position.x > gt.x0 - 25 && player.position.x < gt.x1 + 25 &&
+      player.position.z > gt.z0 - 25 && player.position.z < gt.z1 + 25) {
+    state.gangAggroT = 25;
+  }
   if (res === 'hit' || res === 'miss') syncHUD();
 }
 function reloadPistol() {
-  if (state.mode !== 'playing' || combat.weapon !== 'pistol') return;
-  combat.ammo = 12;
-  hud.center('RELOAD', '12 peluru');
+  if (state.mode !== 'playing' || combat.weapon === 'fists') return;
+  if (combat.reload()) {
+    hud.center('RELOAD', WEAPONS[combat.weapon].label + ' · ' + combat.mags[combat.weapon] + ' peluru');
+  } else {
+    hud.center('PELURU HABIS', 'Cari pickup senjata di kota!');
+  }
   syncHUD();
 }
 function playerAttack() {
   if (state.mode !== 'playing' || state.inCar) return;
   audio.ensure();
-  if (combat.weapon === 'pistol') {
-    if (combat.ammo <= 0) reloadPistol();
+  if (combat.weapon !== 'fists') {
+    if (combat.mags[combat.weapon] <= 0) reloadPistol();
     else playerShoot();
   } else playerMelee();
 }
 function cycleWeapon() {
   if (state.mode !== 'playing' || state.inCar) return;
-  combat.setWeapon(combat.weapon === 'pistol' ? 'fists' : 'pistol');
+  combat.cycleWeapon();
+  syncHUD();
+}
+// v6 (brief E): the aim-mode toggle, shared by the pause button,
+// the C key and the save restore
+function toggleAimMode() {
+  combat.aimMode = combat.aimMode === 'auto' ? 'manual' : 'auto';
+  hud.setAimMode(combat.aimMode);
+  const b = document.getElementById('btn-aim');
+  if (b) b.textContent = '⌖ AIM: ' + (combat.aimMode === 'auto' ? 'AUTO' : 'MANUAL');
   syncHUD();
 }
 addEventListener('keydown', (e) => {
@@ -446,8 +777,12 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
   if (e.code === 'KeyE' && state.mode === 'playing') tryEnterExitCar();
   if (e.code === 'KeyF' && state.mode === 'playing') playerMelee();
-  if (e.code === 'Digit1' && state.mode === 'playing') { combat.setWeapon('fists'); syncHUD(); }
-  if (e.code === 'Digit2' && state.mode === 'playing') { combat.setWeapon('pistol'); syncHUD(); }
+  if (e.code === 'KeyC' && state.mode === 'playing') toggleAimMode();
+  if (e.code.startsWith('Digit') && state.mode === 'playing') {
+    const idx = Number(e.code.slice(5)) - 1;
+    const w = WEAPON_ORDER[idx];
+    if (w && combat.owned.has(w)) { combat.setWeapon(w); syncHUD(); }
+  }
   if (e.code === 'KeyR' && state.mode === 'playing') reloadPistol();
 });
 addEventListener('keyup', (e) => { state.keys[e.code] = false; });
@@ -464,6 +799,7 @@ addEventListener('mousedown', (e) => {
   if (performance.now() - touchTapAt < 700) return;
   if (e.target === canvas && state.mode === 'playing') {
     mouseDrag = { sx: e.clientX, sy: e.clientY, x: e.clientX, y: e.clientY, moved: 0 };
+    state.firing = true;   // v6: holding the mouse keeps auto weapons firing
     return;
   }
   playerShoot();
@@ -477,6 +813,7 @@ addEventListener('mousemove', (e) => {
     Math.abs(e.clientX - mouseDrag.sx) + Math.abs(e.clientY - mouseDrag.sy));
 });
 addEventListener('mouseup', () => {
+  state.firing = false;
   if (!mouseDrag) return;
   const wasClick = mouseDrag.moved < 6;
   mouseDrag = null;
@@ -524,7 +861,7 @@ function refreshTouchUI() {
   if (!document.body.classList.contains('touch')) return;
   const label = state.inCar ? 'BRK' : 'RUN';
   if (runBtn.textContent !== label) runBtn.textContent = label;
-  const atk = state.inCar ? '···' : (combat.weapon === 'pistol' ? 'FIRE' : 'ATK');
+  const atk = state.inCar ? '···' : (combat.weapon !== 'fists' ? 'FIRE' : 'ATK');
   if (atkBtn.textContent !== atk) atkBtn.textContent = atk;
 }
 // the base floats to the thumb: it recentres on the landing point
@@ -599,7 +936,9 @@ function bindTap(id, on, off) {
   el.addEventListener('pointerleave', end);
   return el;
 }
-bindTap('btn-atk', () => playerAttack());
+bindTap('btn-atk',
+  () => { playerAttack(); state.firing = true; },
+  () => { state.firing = false; });
 bindTap('btn-act', () => {
   if (state.mode === 'playing') tryEnterExitCar();
   syncHoldKeys();
@@ -659,6 +998,7 @@ addEventListener('pointercancel', camDragEnd);
 addEventListener('blur', () => {
   stickEnd();
   runHeld = false;
+  state.firing = false;
   syncHoldKeys();
 });
 
@@ -676,6 +1016,7 @@ function nearestCar(maxD) {
   const all = [car].concat(parked, traffic.cars);
   for (const c of all) {
     if (c.userData.parked && c.userData.stolen) continue;
+    if (c.userData.exploded) continue;   // v6: a wreck is not a ride
     if (!c.visible) continue;
     const d = Math.hypot(c.position.x - player.position.x, c.position.z - player.position.z);
     if (d < bestD) { best = c; bestD = d; }
@@ -707,6 +1048,7 @@ function startEnter(c) {
     from: player.position.clone(), focus: c.position,
   };
   hud.setPrompt(null);
+  refreshTouchUI();   // v6 bug fix: RUN→BRK flips NOW, not on the next 10 Hz HUD tick
 }
 function doEnterSwap(tr) {
   const c = tr.target;
@@ -776,8 +1118,10 @@ function startExit() {
     from: player.position.clone(), focus: car.position,
   };
   hud.center('KELUAR MOBIL', '');
+  refreshTouchUI();   // v6: BRK→RUN flips immediately too
 }
 function tryEnterExitCar() {
+  if (player.userData.knock) return;   // v6: no door games mid-tumble
   if (state.transition) {
     // mashing ACT during the entry queues the exit — the toggle
     // must never feel like the button was swallowed
@@ -848,6 +1192,18 @@ function updateCarPrompt() {
   const actBtn = document.getElementById('btn-act');
   if (state.inCar || state.transition || state.mode !== 'playing') {
     state.nearCar = null;
+    // v6 (brief G): inside a BURNING car the exit prompt flashes
+    if (state.inCar && !state.transition && state.mode === 'playing' &&
+        damageStage(car) === 2) {
+      _promptV.set(car.position.x, 2.9, car.position.z).project(camera);
+      if (_promptV.z <= 1 && Math.floor(state.time * 3) % 2 === 0) {
+        hud.setPrompt('🔥 MOBIL TERBAKAR — KELUAR!',
+          (_promptV.x * 0.5 + 0.5) * innerWidth,
+          (-_promptV.y * 0.5 + 0.5) * innerHeight);
+      } else hud.setPrompt(null);
+      if (actBtn && IS_TOUCH) actBtn.classList.add('glow');
+      return;
+    }
     hud.setPrompt(null);
     if (actBtn) actBtn.classList.remove('glow');
     return;
@@ -870,19 +1226,24 @@ function updateCarPrompt() {
 }
 
 // ---------- HUD sync ----------
+// v6 (brief N): the six district names — Beachfront, Downtown, The
+// Palms, Harbor, Midtown, Old Town — one source for the zone tag
+// and the entry splash.
 function zoneNameAt(x, z) {
   const gt = worldInfo.gangTurf;
   if (gt && x >= gt.x0 && x <= gt.x1 && z >= gt.z0 && z <= gt.z1) return 'GANG TURF — PALM BAY GREENS';
   if (x < -150) return 'BEACHFRONT';
-  if (x > 90 && z > 90) return 'PORT';
+  if (x > 90 && z > 90) return 'HARBOR';
   if (Math.abs(x) < 90 && Math.abs(z) < 90) return 'DOWNTOWN';
-  return 'SUBURBS';
+  if (z < -90) return 'THE PALMS';
+  if (x > 90) return 'OLD TOWN';
+  return 'MIDTOWN';
 }
 function syncHUD() {
   hud.setCash(state.cash);
   hud.setHealth(health.pct);
   hud.setStars(police.wanted);
-  hud.setWeapon(combat.weapon, combat.ammo);
+  hud.setWeapon(combat.weapon, combat.mags[combat.weapon], combat.reserves[combat.weapon]);
   hud.setClock(state.clockMin);
   const pp = state.inCar ? car.position : player.position;
   hud.setZone(zoneNameAt(pp.x, pp.z));
@@ -902,6 +1263,28 @@ const clock = new THREE.Clock();
 let hudT = 0;
 let frameNo = 0;
 
+// ---------- input snapshot (v7) -----------------------------------
+// Listeners write state.keys / state.stickVec; ONCE per frame this
+// shapes them into state.input — the only thing the sim reads.
+// Touch stick and keyboard produce the SAME axes, so one movement
+// system serves both, and tests can drive either surface.
+function readInput() {
+  const k = state.keys, sv = state.stickVec, inp = state.input;
+  inp.run = !!(k['ShiftLeft'] || k['ShiftRight']);
+  inp.brake = !!k['Space'];
+  if (sv.mag > 0.001) {
+    inp.stick = true;
+    inp.ax = sv.x;
+    inp.ay = sv.y;
+    inp.mag = sv.mag;
+  } else {
+    inp.stick = false;
+    inp.ax = (k['KeyD'] || k['ArrowRight'] ? 1 : 0) - (k['KeyA'] || k['ArrowLeft'] ? 1 : 0);
+    inp.ay = (k['KeyW'] || k['ArrowUp'] ? 1 : 0) - (k['KeyS'] || k['ArrowDown'] ? 1 : 0);
+    inp.mag = (inp.ax || inp.ay) ? 1 : 0;
+  }
+}
+
 function updatePlayer(dt) {
   const u = player.userData;
   // v5: knocked down by a car — slide, tumble, get up; no control
@@ -909,28 +1292,26 @@ function updatePlayer(dt) {
   if (u.knock) {
     updateKnock(player, dt);
     state.footSpeed = 0;
+    state.footVel.x = 0;
+    state.footVel.z = 0;
     state.sprinting = false;
     if (!u.knock) state.heading = player.rotation.y;
     collideBuildings(player.position, 0.45);
     return;
   }
-  const k = state.keys;
-  const runKey = k['ShiftLeft'] || k['ShiftRight'];
+  const inp = state.input;
+  const runKey = inp.run;
   // v5 input (amendment): the analog stick's speed is PROPORTIONAL
   // to deflection past the dead zone — a small push strolls, a full
   // push runs; the RUN button forces full run. The keyboard keeps
   // its digital walk/run split.
   let mx = 0, mz = 0, speed = 0;
-  const sv = state.stickVec;
-  if (sv.mag > 0.001) {
-    mx = sv.x; mz = sv.y;
-    const t = clamp((sv.mag - STICK_DEAD) / (1 - STICK_DEAD), 0, 1);
+  if (inp.stick) {
+    mx = inp.ax; mz = inp.ay;
+    const t = clamp((inp.mag - STICK_DEAD) / (1 - STICK_DEAD), 0, 1);
     speed = runKey ? CFG.playerRun : CFG.playerRun * t;
-  } else {
-    if (k['KeyW'] || k['ArrowUp']) mz += 1;
-    if (k['KeyS'] || k['ArrowDown']) mz -= 1;
-    if (k['KeyA'] || k['ArrowLeft']) mx -= 1;
-    if (k['KeyD'] || k['ArrowRight']) mx += 1;
+  } else if (inp.ax || inp.ay) {
+    mx = inp.ax; mz = inp.ay;
     speed = runKey ? CFG.playerRun : CFG.playerWalk;
   }
   if ((mx || mz) && speed > 0.01) {
@@ -949,20 +1330,46 @@ function updatePlayer(dt) {
     while (dh > Math.PI) dh -= TAU;
     while (dh < -Math.PI) dh += TAU;
     state.heading += clamp(dh, -10.5 * dt, 10.5 * dt);
-    const ang = state.heading;
-    state.footSpeed = speed;
-    // v5 gait (fix #6): the blend factor sf morphs the ANIMATION
-    // with speed — relaxed upright walk at sf 0, wide-swinging
-    // forward-leaning run at sf 1 — and the legs turn over faster
-    const sf = clamp((speed - CFG.playerWalk) / (CFG.playerRun - CFG.playerWalk), 0, 1);
-    state.sprinting = sf > 0.55;
-    player.position.x += Math.sin(ang) * speed * dt;
-    player.position.z += Math.cos(ang) * speed * dt;
-    player.position.x = clamp(player.position.x, -208, 208);
+  }
+  // v6 (brief D): movement is VELOCITY-based now — acceleration and
+  // damping curves instead of teleport-speed. The stick gets an
+  // expo curve (fine control at small deflections), stops are
+  // crisp (~0.8 m from a full run), and footSpeed is the REAL
+  // speed, so the bust meter and gait read the truth.
+  const fv = state.footVel;
+  let desX = 0, desZ = 0;
+  if ((mx || mz) && speed > 0.01) {
+    let sp = speed;
+    if (inp.stick && !runKey) {
+      // analog expo: t^1.35 through the dead zone
+      const t = clamp((inp.mag - STICK_DEAD) / (1 - STICK_DEAD), 0, 1);
+      sp = CFG.playerRun * Math.pow(t, 1.35);
+    }
+    desX = Math.sin(state.heading) * sp;
+    desZ = Math.cos(state.heading) * sp;
+  }
+  const accel = (desX || desZ) ? 42 : 85;
+  const dvx = desX - fv.x, dvz = desZ - fv.z;
+  const dvLen = Math.hypot(dvx, dvz);
+  const maxDv = accel * dt;
+  if (dvLen > maxDv) { fv.x += dvx / dvLen * maxDv; fv.z += dvz / dvLen * maxDv; }
+  else { fv.x = desX; fv.z = desZ; }
+  state.footSpeed = Math.hypot(fv.x, fv.z);
+  if (state.footSpeed < 0.06 && !desX && !desZ) {
+    fv.x = 0; fv.z = 0; state.footSpeed = 0;
+  }
+  if (state.footSpeed > 0.01) {
+    player.position.x += fv.x * dt;
+    player.position.z += fv.z * dt;
+    // v6 (brief C): the sand, the pier and the beach bar are inside
+    // the world now — the old ±208 clamp walled the mission off
+    player.position.x = clamp(player.position.x, -246, 208);
     player.position.z = clamp(player.position.z, -208, 208);
-    player.rotation.y = ang;
+    player.rotation.y = state.heading;
+    const sf = clamp((state.footSpeed - CFG.playerWalk) / (CFG.playerRun - CFG.playerWalk), 0, 1);
+    state.sprinting = sf > 0.55;
     const rate = 2.3 + 1.4 * sf;
-    u.walkPhase += dt * speed * rate;
+    u.walkPhase += dt * state.footSpeed * rate;
     u.walk(u.walkPhase, 0.5 + 0.48 * sf, 0.02 + 0.15 * sf);
     // bump peds aside
     for (const p of peds.peds) {
@@ -970,31 +1377,43 @@ function updatePlayer(dt) {
       if (d < 1.1) peds.fleeFrom(player.position.x, player.position.z, 6);
     }
   } else {
-    state.footSpeed = 0;
     state.sprinting = false;
     u.idle();
   }
   // v3: buildings are solid for the player too (v2 walked through them)
   collideBuildings(player.position, 0.45);
-  // keep the pistol aim pose while armed
-  if (combat.weapon === 'pistol') u.armR.rotation.x = -1.35;
+  // keep the aim pose while armed
+  if (combat.weapon !== 'fists') u.armR.rotation.x = -1.35;
+  // v6 (brief M): the punch swing — a fast jab out and back
+  if (state.punchT > 0) {
+    state.punchT -= dt;
+    const k = 1 - Math.abs(state.punchT / 0.22 - 0.5) * 2;
+    u.armR.rotation.x = -1.5 * Math.max(0, k);
+    u.armR.rotation.z = -0.25 * Math.max(0, k);
+  }
 }
 
+// v7: pooled drive vectors — updateCar runs per frame, no new
+const _carFwd = new THREE.Vector3();
+const _carRight = new THREE.Vector3();
+const _carBack = new THREE.Vector3();
+const _exhaustTip = new THREE.Vector3();
+
 function updateCar(dt) {
-  const k = state.keys;
   const u = car.userData;
   // v5 (amendment): the analog stick drives too — up/down is
   // proportional throttle / brake-reverse, left/right steers.
   // The keyboard keeps its digital inputs when the stick is idle.
-  const sv = state.stickVec;
-  const stickDriving = sv.mag > STICK_DEAD;
+  // v7: both surfaces arrive via the state.input snapshot.
+  const inp = state.input;
+  const stickDriving = inp.stick && inp.mag > STICK_DEAD;
   let throttle = 0;
-  if (stickDriving) throttle = sv.y;
+  if (stickDriving) throttle = inp.ay;
   else {
-    if (k['KeyW'] || k['ArrowUp']) throttle += 1;
-    if (k['KeyS'] || k['ArrowDown']) throttle -= 0.7;
+    if (inp.ay > 0) throttle += 1;
+    if (inp.ay < 0) throttle -= 0.7;
   }
-  const braking = !!k['Space'];
+  const braking = inp.brake;
   if (braking) throttle = -1.4;
   // v5 amendment: ACT at speed does not eject — it stands on the
   // brakes, and the exit sequence starts once nearly stopped
@@ -1006,9 +1425,12 @@ function updateCar(dt) {
       return;
     }
   }
-  state.carSpeed += throttle * CFG.carAccel * dt;
+  state.carSpeed += throttle * CFG.carAccel *
+    (throttle > 0 ? (1 - 0.45 * Math.abs(state.carSpeed) / Math.max(1, u.maxSpeed)) : 1) * dt;
   state.carSpeed -= state.carSpeed * 0.6 * dt; // drag
-  state.carSpeed = clamp(state.carSpeed, -10, u.maxSpeed);
+  // v6 (brief G): a car at damage stage 2 loses 30% of its top end
+  state.carSpeed = clamp(state.carSpeed, -10,
+    u.maxSpeed * (u.dmgStage === 2 ? 0.7 : 1));
   // brake lights + skid sound on hard braking
   setBrake(car, braking || throttle < -0.5);
   if (braking && Math.abs(state.carSpeed) > 8 && state.skidT <= 0) {
@@ -1017,26 +1439,56 @@ function updateCar(dt) {
   }
   state.skidT -= dt;
   let steer = 0;
-  if (stickDriving) steer = -sv.x;
-  else {
-    if (k['KeyA'] || k['ArrowLeft']) steer += 1;
-    if (k['KeyD'] || k['ArrowRight']) steer -= 1;
-  }
+  if (stickDriving) steer = -inp.ax * (0.55 + 0.45 * Math.abs(inp.ax));
+  else steer = -inp.ax;
   if (state.exitPending) steer = 0;
   const spd = state.carSpeed;
   if (Math.abs(spd) > 0.5) {
-    car.rotation.y += steer * CFG.carTurn * dt * clamp(Math.abs(spd) / 12, 0.3, 1) * Math.sign(spd);
+    // v6 (brief D): steering authority fades a little at speed —
+    // planted, not twitchy
+    car.rotation.y += steer * CFG.carTurn * dt *
+      clamp(Math.abs(spd) / 12, 0.3, 1) * (1 - 0.25 * Math.abs(spd) / Math.max(1, u.maxSpeed)) *
+      Math.sign(spd);
   }
-  const fwd = new THREE.Vector3(0, 0, 1).applyEuler(car.rotation);
-  car.position.addScaledVector(fwd, spd * dt);
-  car.position.x = clamp(car.position.x, -208, 208);
-  car.position.z = clamp(car.position.z, -208, 208);
+  const fwd = _carFwd.set(0, 0, 1).applyEuler(car.rotation);
+  // v7 (skill: fast movers never tunnel): sub-step the travel so
+  // no sub-step moves more than ~1.1 m — at top speed a frame step
+  // is ~2 m, enough to jump a thin house-wall segment otherwise
+  const steps = Math.max(1, Math.ceil(Math.abs(spd) * dt / 1.1));
+  const sdt = dt / steps;
+  let wallHit = false;
+  for (let s = 0; s < steps; s++) {
+    car.position.addScaledVector(fwd, spd * sdt);
+    // v6 (brief C): cars can reach the beach road end too
+    car.position.x = clamp(car.position.x, -238, 208);
+    car.position.z = clamp(car.position.z, -208, 208);
+    if (collideBuildings(car.position, 2.3) > 0) wallHit = true;
+  }
   // v5: the wheels finally turn — spin with travel, fronts steer
   rollWheels(car, spd * dt);
   steerWheels(car, steer * 0.45);
+  // v6 (brief N): skid-mark ribbons on hard turns and hard braking
+  if ((Math.abs(steer) > 0.55 && Math.abs(spd) > 11) || (braking && Math.abs(spd) > 13)) {
+    const st = u.style || { w: 1.85, l: 4.4 };
+    const back = _carBack.copy(car.position).addScaledVector(fwd, -st.l * 0.32);
+    const right = _carRight.set(1, 0, 0).applyEuler(car.rotation);
+    skidMarks.add(back.x - right.x * (st.w / 2 - 0.12), back.z - right.z * (st.w / 2 - 0.12),
+      car.rotation.y, Math.abs(spd) * dt + 0.35);
+    skidMarks.add(back.x + right.x * (st.w / 2 - 0.12), back.z + right.z * (st.w / 2 - 0.12),
+      car.rotation.y, Math.abs(spd) * dt + 0.35);
+  }
   // v3: buildings are solid — hitting one scrubs speed (v2 drove
   // straight through every building in the city)
-  if (collideBuildings(car.position, 2.3) > 0) state.carSpeed *= 0.55;
+  // v6 (brief G): ...and crumples the car by impact speed
+  if (wallHit) {
+    const prevSpd = state.carSpeed;
+    state.carSpeed *= 0.55;
+    if (Math.abs(prevSpd) > 6) {
+      damageCarFromHit(car, clamp(Math.abs(prevSpd) * 0.8, 5, 20));
+      addTrauma(0.3);
+      addHitstop(0.03);
+    }
+  }
   // hit traffic + parked cars (simple arcade shove + slowdown)
   for (const oc of traffic.cars) {
     const d = Math.hypot(oc.position.x - car.position.x, oc.position.z - car.position.z);
@@ -1045,19 +1497,24 @@ function updateCar(dt) {
       oc.position.z += fwd.z * 1.2;
       state.carSpeed *= 0.7;
       audio.play('punch');
+      damageCarFromHit(oc, clamp(Math.abs(spd) * 0.7, 5, 18));
+      damageCarFromHit(car, clamp(Math.abs(spd) * 0.4, 3, 12));
     }
   }
   for (const oc of parked) {
     if (!oc.visible) continue;
     const d = Math.hypot(oc.position.x - car.position.x, oc.position.z - car.position.z);
-    if (d < 3.1 && Math.abs(spd) > 2) state.carSpeed *= 0.7;
+    if (d < 3.1 && Math.abs(spd) > 2) {
+      state.carSpeed *= 0.7;
+      damageCarFromHit(oc, clamp(Math.abs(spd) * 0.7, 5, 18));
+    }
   }
   // exhaust puffs while accelerating
   state.exhaustT -= dt;
   if (throttle > 0.3 && state.exhaustT <= 0) {
     state.exhaustT = 0.12;
-    const back = new THREE.Vector3(0, 0, -1).applyEuler(car.rotation);
-    const tip = car.position.clone().addScaledVector(back, 2.3);
+    const back = _carBack.set(0, 0, -1).applyEuler(car.rotation);
+    const tip = _exhaustTip.copy(car.position).addScaledVector(back, 2.3);
     tip.y = 0.35;
     combat.smoke.puff(tip, 0.25, 0x8a8a8a);
   }
@@ -1080,9 +1537,22 @@ function updateCar(dt) {
     const d = Math.hypot(chaseTarget.position.x - car.position.x, chaseTarget.position.z - car.position.z);
     if (d < 3.4 && Math.abs(spd) > 4) {
       missions.registerChaseHit();
+      damageCarFromHit(chaseTarget, 10);
+      addHitstop(0.05);
+      addTrauma(0.25);
       state.carSpeed *= 0.5;
       chaseTarget.position.x += fwd.x * 3;
       chaseTarget.position.z += fwd.z * 3;
+    }
+  }
+  // v6: the car hits gang members too — and they remember it
+  for (const m of gangMembers) {
+    const hit = carPersonHit(car, m, Math.abs(spd));
+    if (hit && hit.knocked) {
+      police.addWanted(1);
+      state.gangAggroT = 25;
+      state.carSpeed *= 0.6;
+      audio.play('punch');
     }
   }
   // police ram slows the hero car
@@ -1121,10 +1591,34 @@ function updateChaseTarget(dt) {
 }
 
 // ---------- camera ----------
+// v6 (brief B): the follow camera rides a critically-damped spring
+// (Unity-style SmoothDamp) instead of a bare lerp — acceleration
+// stays continuous, so the measured jerk stays bounded and there
+// is never a snap, at any speed. A velocity lookahead leans the
+// view into the direction of travel.
 const camTarget = new THREE.Vector3();
 let shotCamPos = null;
 let shotCamTarget = null;
 const _camV = new THREE.Vector3();
+const camVel = new THREE.Vector3();
+function smoothDamp(cur, target, vel, smoothTime, dt) {
+  const omega = 2 / smoothTime;
+  const x = omega * dt;
+  const e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const change = cur - target;
+  const temp = (vel + omega * change) * dt;
+  const newVel = (vel - omega * temp) * e;
+  let out = target + (change + temp) * e;
+  if ((target - cur > 0) === (out > target)) { out = target; return [out, 0]; }
+  return [out, newVel];
+}
+function smoothDampVec(pos, target, vel, smoothTime, dt) {
+  const a = smoothDamp(pos.x, target.x, vel.x, smoothTime, dt);
+  const b = smoothDamp(pos.y, target.y, vel.y, smoothTime, dt);
+  const c = smoothDamp(pos.z, target.z, vel.z, smoothTime, dt);
+  pos.set(a[0], b[0], c[0]);
+  vel.set(a[1], b[1], c[1]);
+}
 function updateCamera(dt) {
   // staged shots: snap to the composed camera, no drift
   if (SHOT && shotCamPos) {
@@ -1167,22 +1661,256 @@ function updateCamera(dt) {
   state.camYaw += dy * (1 - Math.exp(-4.2 * dt));
   const cx = focus.x + Math.sin(state.camYaw) * dist;
   const cz = focus.z + Math.cos(state.camYaw) * dist;
-  camera.position.lerp(_camV.set(cx, height, cz), 1 - Math.exp(-6 * dt));
+  // v6: spring-damped position (no lerp pops when the focus
+  // teleports between foot and car — the spring absorbs it)
+  smoothDampVec(camera.position, _camV.set(cx, height, cz), camVel,
+    state.inCar ? 0.34 : 0.26, dt);
   // v3 audit: keep the chase camera out of buildings (it used to
   // clip inside facades whenever the player backed against a wall)
   collideBuildings(camera.position, 0.7);
+  // v6: velocity lookahead — the look target leans ahead of travel
+  let lx = focus.x, lz = focus.z;
+  if (state.inCar) {
+    lx += Math.sin(car.rotation.y) * clamp(state.carSpeed * 0.32, -5, 7);
+    lz += Math.cos(car.rotation.y) * clamp(state.carSpeed * 0.32, -5, 7);
+  } else {
+    lx += state.footVel.x * 0.22;
+    lz += state.footVel.z * 0.22;
+  }
   const lookY = focus.y + 1.6;
-  camTarget.lerp(_camV.set(focus.x, lookY, focus.z), 1 - Math.exp(-8 * dt));
+  camTarget.lerp(_camV.set(lx, lookY, lz), 1 - Math.exp(-8 * dt));
   camera.lookAt(camTarget);
+  // v7 (skill Feel Numbers): trauma shake — amplitude = trauma²,
+  // trauma decays ~1.4/s, offset includes a whisper of roll
+  state.trauma = Math.max(0, state.trauma - 1.4 * dt);
+  state.shake = state.trauma * state.trauma;
+  if (state.shake > 0.0004) {
+    camera.position.x += (rand() - 0.5) * state.shake * 0.55;
+    camera.position.y += (rand() - 0.5) * state.shake * 0.38;
+    camera.rotation.z += (rand() - 0.5) * state.shake * 0.012;
+  }
   // v5 (fix #6): sprinting widens the FOV a touch — speed you can
   // feel; driving already had its own smaller kick
   const targetFov = 62 + (state.inCar
-    ? clamp(Math.abs(state.carSpeed) / CFG.carMax, 0, 1) * 5
+    ? clamp(Math.abs(state.carSpeed) / CFG.carMax, 0, 1) * 7
     : (state.sprinting ? 7 : 0));
   if (Math.abs(camera.fov - targetFov) > 0.05) {
     camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 5);
     camera.updateProjectionMatrix();
   }
+}
+
+// ---------- v6 per-frame systems ----------------------------------
+// the gang: idle until provoked; then riflemen return fire and the
+// rest close in to brawl (briefs F/M)
+const _gangFrom = new THREE.Vector3();
+const _gangTo = new THREE.Vector3();
+function updateGang(dt) {
+  if (state.gangAggroT > 0) state.gangAggroT -= dt;
+  const aggro = state.gangAggroT > 0 && state.mode === 'playing';
+  const pp = state.inCar ? car.position : player.position;
+  for (const m of gangMembers) {
+    const u = m.userData;
+    if (u.dead) { updateKnock(m, dt); continue; }
+    if (u.knock) { updateKnock(m, dt); continue; }
+    const d = Math.hypot(m.position.x - pp.x, m.position.z - pp.z);
+    if (!aggro || d > 60) {
+      if (u.brawl) stopBrawl(m);
+      continue;
+    }
+    if (u.rifle && d > 6 && d < 45 && combat._hasLoS(m.position, pp)) {
+      if (u.brawl) stopBrawl(m);
+      u.fireT = (u.fireT || 0) - dt;
+      m.rotation.y = Math.atan2(pp.x - m.position.x, pp.z - m.position.z);
+      u.armR.rotation.x = -1.45;
+      if (u.fireT <= 0) {
+        u.fireT = 0.55 + rand() * 0.5;
+        const from = _gangFrom.copy(m.position); from.y = 1.5;
+        const to = _gangTo.copy(pp); to.y = 1.1;
+        const res = combat.fireNPC(from, to, 0.42);
+        if (res.hit && !state.transition) {
+          if (state.inCar) damageCarFromHit(car, 3);
+          if (health.damage(3 + rand() * 3)) showEnd('wasted');
+          syncHUD();
+        }
+      }
+    } else if (!state.inCar) {
+      if (!u.brawl) {
+        startBrawl(m, player, () => {
+          if (state.mode !== 'playing' || state.inCar) return;
+          audio.play('punch');
+          if (health.damage(3 + rand() * 3)) showEnd('wasted');
+          syncHUD();
+        });
+      }
+      updateBrawl(m, dt, rand);
+    }
+  }
+}
+
+// the FOLLOW courier walks his route; waypoints fire CHECKPOINT
+function updateCourier(dt) {
+  const active = missions.active && missions.current && missions.current.follow;
+  if (!active) { courier.visible = false; return; }
+  courier.visible = true;
+  const u = courier.userData;
+  if (u.dead) { missions.followPos = courier.position; return; }
+  const wp = COURIER_ROUTE[courierWp];
+  missions.followPos = courier.position;
+  if (!wp) { missions.followDone = true; u.idle(); return; }
+  const dx = wp.x - courier.position.x, dz = wp.z - courier.position.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 1.2) {
+    courierWp += 1;
+    if (courierWp >= COURIER_ROUTE.length) {
+      missions.followDone = true;
+      hud.banner('TUJUAN AKHIR — TETAP DEKAT');
+    } else {
+      missions.wpIndex = courierWp;
+      hud.banner('CHECKPOINT');
+    }
+    return;
+  }
+  const heading = Math.atan2(dx, dz);
+  courier.rotation.y = heading;
+  courier.position.x += Math.sin(heading) * 2.6 * dt;
+  courier.position.z += Math.cos(heading) * 2.6 * dt;
+  collideBuildings(courier.position, 0.45);
+  u.walkPhase += dt * 2.6 * 2.6;
+  u.walk(u.walkPhase, 0.45, 0.05);
+  if (missions.marker) missions.marker.position.set(courier.position.x, 0, courier.position.z);
+}
+
+// pickups: spin/bob, collect on walk-over or drive-over (briefs L/N)
+function updatePickups(dt) {
+  const pp = state.inCar ? car.position : player.position;
+  const radius = state.inCar ? 2.7 : 1.8;
+  for (const pk of pickups) {
+    if (pk.taken) {
+      pk.respawnT -= dt;
+      if (pk.respawnT <= 0) {
+        pk.taken = false;
+        pk.group.visible = true;
+        pk.group.position.set(pk.hx, 0, pk.hz);   // magnet slide resets
+      }
+      continue;
+    }
+    pk.icon.rotation.y += dt * 1.6;
+    pk.icon.position.y = 0.95 + Math.sin(state.time * 2.4 + pk.x) * 0.12;
+    pk.ring.rotation.z += dt * 0.8;
+    // v7 feel number: the pickup MAGNET — on foot, a pickup within
+    // ~3 m drifts toward Dario; nobody pixel-hunts a collect radius
+    const gp = pk.group.position;
+    let d = Math.hypot(gp.x - pp.x, gp.z - pp.z);
+    if (!state.inCar && d > 0.9 && d < 3.2 && state.mode === 'playing') {
+      const pull = Math.min(2.4 * dt, d - 0.85);
+      gp.x += (pp.x - gp.x) / d * pull;
+      gp.z += (pp.z - gp.z) / d * pull;
+      d = Math.hypot(gp.x - pp.x, gp.z - pp.z);
+    }
+    if (d < radius && state.mode === 'playing') {
+      if (pk.kind === 'health') {
+        if (health.hp >= CFG.playerHealth) continue;   // full: leave it
+        health.heal(50);
+        hud.center('+50 HP', 'Kotak P3K');
+        audio.play('chime');
+        pk.taken = true; pk.respawnT = 45; pk.group.visible = false;
+      } else {
+        const w = pk.weapon;
+        const fresh = !combat.owned.has(w);
+        combat.giveWeapon(w);
+        if (!state.inCar) combat.setWeapon(w);
+        hud.center(fresh ? 'SENJATA BARU' : 'AMUNISI',
+          WEAPONS[w].label + ' · ' + combat.mags[w] + ' + ' + combat.reserves[w]);
+        audio.play('chime');
+        pk.taken = true; pk.respawnT = 60; pk.group.visible = false;
+      }
+      syncHUD();
+    }
+  }
+}
+
+// enterable houses: doors swing, interiors wake near the player,
+// roof + far wall hide while Dario is inside (briefs J/K)
+function updateHouses() {
+  for (const h of worldInfo.houses) {
+    const cx = (h.rect.x0 + h.rect.x1) / 2, cz = (h.rect.z0 + h.rect.z1) / 2;
+    const d = Math.hypot(player.position.x - cx, player.position.z - cz);
+    h.interior.visible = d < 30 && !state.inCar;
+    const inside = !state.inCar &&
+      player.position.x > h.rect.x0 - 0.2 && player.position.x < h.rect.x1 + 0.2 &&
+      player.position.z > h.rect.z0 - 0.2 && player.position.z < h.rect.z1 + 0.2;
+    h.roof.visible = !inside;
+    h.farWall.visible = !inside;
+    const dd = Math.hypot(player.position.x - h.doorPos.x, player.position.z - h.doorPos.z);
+    const target = dd < 2.4 ? -1.85 : 0;
+    h.doorPivot.rotation.y += (target - h.doorPivot.rotation.y) * 0.25;
+  }
+}
+
+// vehicle damage presentation (brief G): smoke stages, engine
+// flame, burning-car DoT, chained explosions
+const _engV = new THREE.Vector3();
+function updateOneCarDamage(c, dt) {
+  const u = c.userData;
+  if (!c.visible || u.exploded) return;
+  const stage = damageStage(c);
+  u.dmgStage = stage;
+  if (stage === 0) return;
+  u.smokeT = (u.smokeT || 0) - dt;
+  if (u.smokeT <= 0) {
+    u.smokeT = stage === 2 ? 0.13 : 0.3;
+    const st = u.style || { l: 4.4 };
+    _engV.set(0, 1.0, st.l * 0.32).applyEuler(c.rotation).add(c.position);
+    combat.smoke.puff(_engV, stage === 2 ? 0.65 : 0.45,
+      stage === 2 ? 0x2e2e2e : 0x9a9a9a);
+    if (stage === 2 && rand() < 0.5) {
+      combat.sparks.burst(_engV, 2);
+    }
+  }
+  if (stage === 2) {
+    if (!u.flame) {
+      u.flame = glowSprite(0xff7a22, 1.5, 0.85);
+      const st2 = u.style || { l: 4.4 };
+      u.flame.position.set(0, 0.95, st2.l * 0.32);
+      c.add(u.flame);
+    }
+    u.flame.visible = true;
+    u.flame.material.opacity = 0.6 + Math.sin(state.time * 31 + c.id) * 0.25;
+  } else if (u.flame) u.flame.visible = false;
+}
+function updateCarDamage(dt) {
+  // chained explosions land on their timer
+  for (let i = state.pendingBooms.length - 1; i >= 0; i--) {
+    const pb = state.pendingBooms[i];
+    pb.t -= dt;
+    if (pb.t <= 0) {
+      state.pendingBooms.splice(i, 1);
+      damageCarFromHit(pb.car, pb.dmg);
+    }
+  }
+  // v7: iterate the owning lists directly — no per-frame array
+  // build, and the per-car worker is a module function, not a
+  // per-frame closure
+  updateOneCarDamage(car, dt);
+  updateOneCarDamage(chaseTarget, dt);
+  for (const c of parked) updateOneCarDamage(c, dt);
+  for (const c of traffic.cars) updateOneCarDamage(c, dt);
+  for (const c of police.cars) updateOneCarDamage(c, dt);
+  // sitting in a burning car hurts — get out (the prompt flashes)
+  if (state.inCar && !state.transition && damageStage(car) === 2) {
+    if (health.damage(6 * dt)) showEnd('wasted');
+  }
+}
+
+// headlight cones (brief N): only the nearest few cars burn them
+function updateHeadlights() {
+  const all = [car, chaseTarget, ...parked, ...traffic.cars, ...police.cars];
+  const near = all
+    .filter((c) => c.visible && c.userData.headlightCones && !c.userData.exploded)
+    .map((c) => ({ c, d: c.position.distanceToSquared(camera.position) }))
+    .sort((a, b) => a.d - b.d);
+  near.forEach((e, i) => { e.c.userData.headlightCones.visible = i < 8; });
 }
 
 // ---------- busted / wasted ----------
@@ -1272,9 +2000,10 @@ function applyShot() {
     state.carSpeed = 26;
     state.camYaw = car.rotation.y + Math.PI;
     police.setWanted(3);
-    // v3 audit: the cover depicts a chase — start THE CHASE (index 1),
-    // not HOT DELIVERY, so the HUD objective matches the picture
-    missions.start(1);
+    // v3 audit: the cover depicts a chase — start THE CHASE, not
+    // HOT DELIVERY, so the HUD objective matches the picture
+    // (v6 renumbering: THE CHASE is index 2 now)
+    missions.start(2);
     state.cash = 2450;
     state.missionsDone = 2;
     state.clockMin = 1142; // 19:02
@@ -1306,11 +2035,17 @@ function applyShot() {
     player.position.set(-198.7, 0, -10);
     state.heading = 0;
     state.camYaw = state.heading + Math.PI;
-    police.setWanted(1);
     missions.start(0);
     state.cash = 520;
     state.clockMin = 1135; // 18:55
     preroll(4);
+    // review fix: setWanted AFTER the preroll and re-pin Dario —
+    // a preroll pursuit car rams him off the promenade and the
+    // camera ends up inside the facade behind him
+    police.setWanted(1);
+    player.position.set(-198.7, 0, -4);
+    player.rotation.x = 0;
+    state.heading = 0;
     // a pedestrian + the dog walk toward the player on the same sidewalk
     const walker = peds.peds[0];
     walker.position.set(-198.7, 0, 14);
@@ -1345,7 +2080,7 @@ function applyShot() {
     state.carSpeed = 18;
     state.camYaw = car.rotation.y + Math.PI;
     police.setWanted(2);
-    missions.start(2);
+    missions.start(3);   // v6: HOT DELIVERY is index 3 now
     missions.timer = 42;
     state.cash = 1250;
     state.clockMin = 1147; // 19:07
@@ -1417,6 +2152,138 @@ function applyShot() {
     shotCamTarget = new THREE.Vector3(30, 0.7, 44);
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'beach') {
+    // v6 (brief C): mission 1 AT the beach bar's door — Dario on the
+    // sand in front of the bar, checkpoint pillar on the door, the
+    // pier and the sea behind the camera's shoulder
+    state.inCar = false;
+    missions.start(0);
+    state.cash = 520;
+    state.clockMin = 1135;
+    const door = worldInfo.beachBar.door;
+    // staged EAST of the door, outside the 6 m completion radius —
+    // inside it the mission completes during preroll and the frame
+    // ends up showing the NEXT mission's text (caught in review)
+    player.position.set(door.x + 7, 0, door.z + 2.5);
+    state.heading = Math.atan2(door.x - player.position.x, door.z - player.position.z);
+    player.rotation.y = state.heading;
+    state.camYaw = state.heading + Math.PI;
+    preroll(2);
+    shotCamPos = new THREE.Vector3(door.x + 9, 2.4, door.z + 6.5);
+    shotCamTarget = new THREE.Vector3(door.x - 4, 1.3, door.z);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'interior') {
+    // v6 (brief K): inside the furnished enterable house — sofa, TV
+    // glowing, kitchen behind; roof + far wall hidden by the
+    // inside-check in updateHouses once prerolled
+    state.inCar = false;
+    missions.start(0);
+    state.cash = 520;
+    state.clockMin = 1140;
+    const h = worldInfo.houses[0];
+    const cx = (h.rect.x0 + h.rect.x1) / 2, cz = (h.rect.z0 + h.rect.z1) / 2;
+    player.position.set(cx + 1.2, 0, cz + 1.6);
+    state.heading = Math.PI * 0.9;
+    player.rotation.y = state.heading;
+    h.interior.visible = true;
+    h.roof.visible = false;
+    h.farWall.visible = false;
+    preroll(2);
+    shotCamPos = new THREE.Vector3(cx + 3.4, 1.9, cz + 3.1);
+    shotCamTarget = new THREE.Vector3(cx - 2.6, 1.0, cz - 2.2);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'shootout') {
+    // v6 (briefs E/F): wanted 2 — an officer in fire stance trades
+    // shots while Dario's AUTO lock ring rides a gang rifleman
+    state.inCar = false;
+    missions.start(0);
+    state.cash = 1250;
+    state.clockMin = 1147;
+    player.position.set(88, 0, -38);
+    state.heading = Math.PI * 0.72;
+    player.rotation.y = state.heading;
+    state.camYaw = state.heading + Math.PI;
+    combat.aimMode = 'auto';
+    combat.setWeapon('pistol');
+    hud.setAimMode('auto');
+    police.setWanted(2);
+    // stage a rifleman in front of Dario and lock onto him
+    const m = gangMembers[0];
+    m.position.set(93, 0, -43.5);
+    m.rotation.y = Math.PI * 1.2;
+    combat.lockTarget = m;
+    combat.lockLostT = 0;
+    preroll(3);
+    // post-preroll tableau (review fix x2: frame tight over the
+    // shoulder — foe ~6 m from the camera so the lock ring reads,
+    // police car INSIDE the view cone behind the gang)
+    const pc = police.cars[0];
+    if (pc) {
+      pc.position.set(97.5, 0, -47.5);
+      pc.rotation.y = -2.2;
+      pc.userData.speed = 0;
+      const off = police.officers[0];
+      if (off) {
+        off.mode = 'fire';
+        off.person.position.set(95.6, 0, -45.6);
+        off.person.rotation.y = Math.atan2(
+          player.position.x - 95.6, player.position.z + 45.6);
+        off.person.userData.armR.rotation.x = -1.35;
+      }
+    }
+    player.userData.armR.rotation.x = -1.35;
+    m.userData.armR.rotation.x = -1.35;
+    combat.lockFx.position.set(m.position.x, 2.15, m.position.z);
+    combat.lockFx.visible = true;
+    shotCamPos = new THREE.Vector3(89.5, 1.8, -37.2);
+    shotCamTarget = new THREE.Vector3(93.5, 1.3, -42.6);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'skid') {
+    // v6 (brief N): mid-drift on the avenue — skid ribbons laid
+    // behind the hero car, brake lights on, traffic ahead.
+    // Review fix: lay the arc AFTER the preroll, ending at the
+    // car's actual rear wheels (the car rolls during preroll —
+    // the first frame had the marks 30 m behind an empty road),
+    // darker and longer so the J-turn reads at a glance.
+    state.inCar = true;
+    player.visible = false;
+    car.position.set(-150, 0, 40);
+    car.rotation.y = 0.85;
+    state.carSpeed = 22;
+    state.camYaw = car.rotation.y + Math.PI;
+    missions.start(0);
+    state.cash = 1250;
+    state.clockMin = 1140;
+    setBrake(car, true);
+    preroll(0.6);
+    // review fix x2: clear the avenue (a traffic van wandered into
+    // the first frame and T-boned the tableau) and re-pin the hero
+    // car to its staged spot before laying the arc
+    for (const tc of traffic.cars) tc.position.set(190, 0, 190);
+    car.position.set(-150, 0, 40);
+    state.carSpeed = 0;
+    car.rotation.y = 0.85;   // the drift angle, held for the frame
+    const cx = car.position.x, cz = car.position.z;
+    const fx = Math.sin(0.85), fz = Math.cos(0.85);
+    const rx = Math.cos(0.85), rz = -Math.sin(0.85);
+    for (let i = 0; i < 34; i++) {
+      const t = i / 34;
+      const back = 1.6 + i * 0.85;
+      const sway = t * t * 7;         // the J-curve bending away
+      const bx = cx - fx * back - rx * sway;
+      const bz = cz - fz * back - rz * sway;
+      const hd = 0.85 + t * 0.5;
+      skidMarks.add(bx - rx * 0.78, bz - rz * 0.78, hd, 1.05, 0.3, 0.62);
+      skidMarks.add(bx + rx * 0.78, bz + rz * 0.78, hd, 1.05, 0.3, 0.62);
+    }
+    skidMarks.update();
+    shotCamPos = new THREE.Vector3(cx + 8.5, 2.7, cz - 9.5);
+    shotCamTarget = new THREE.Vector3(cx - 1, 0.8, cz + 2);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
   }
   syncHUD();
   // one minimap draw right away so the first frame already shows it
@@ -1431,9 +2298,20 @@ function applyShot() {
 }
 
 // ---------- main loop ----------
+// v7: reusable minimap blip pool (pickups ≤ 9 by design)
+const _blipPool = [];
+for (let i = 0; i < 12; i++) _blipPool.push({ x: 0, z: 0, kind: 'weapon' });
+const _blips = [];
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = Math.min(clock.getDelta(), 0.05);
+  // v7 hitstop: solid hits freeze the sim to ~12% for 30-90 ms —
+  // the single cheapest "weight" in game feel
+  let dt = rawDt;
+  if (state.hitstop > 0) {
+    state.hitstop -= rawDt;
+    dt = rawDt * 0.12;
+  }
   state.time += dt;
   state.clockMin += dt / 10;   // golden hour drifts slowly, never resets
 
@@ -1463,6 +2341,7 @@ function animate() {
   updateSun(state.inCar ? car.position : player.position);
 
   if (state.mode === 'playing') {
+    readInput();
     if (state.transition) advanceTransition(dt);
     else if (state.inCar) updateCar(dt);
     else updatePlayer(dt);
@@ -1478,6 +2357,15 @@ function animate() {
     cat.update(dt);
     updateChaseTarget(dt);
     combat.update(dt);
+    // v6 systems
+    updateGang(dt);
+    updateCourier(dt);
+    updatePickups(dt);
+    updateHouses();
+    updateCarDamage(dt);
+    explosion.update(dt);
+    skidMarks.update();
+    if (state.firing && !state.inCar && !state.transition) playerAttack();
     const playerPos = state.inCar ? car.position : player.position;
     // v3 audit: on foot the bust meter now sees the REAL movement
     // speed — v2 passed 0, so it filled even while sprinting away
@@ -1515,6 +2403,7 @@ function animate() {
       if (missions.active && missions.current) {
         const def = missions.current;
         if (def.chase && chaseTarget.visible) target = chaseTarget.position;
+        else if (def.follow) target = courier.position;
         else if (!def.escape) target = { x: def.target[0], z: def.target[1] };
       }
       if (target) {
@@ -1529,6 +2418,7 @@ function animate() {
     // auto-save every 20s
     if (state.time % 20 < dt) writeSave();
     updateCamera(dt);
+    combat.updateLock(camera, dt);
     // HUD refresh ~10/s
     hudT += dt;
     if (hudT > 0.1) {
@@ -1536,13 +2426,57 @@ function animate() {
       syncHUD();
       hud.setSpeed(state.inCar ? Math.abs(state.carSpeed) * 3.6 : 0);
       hud.setBust(police.bust / 100);
+      // v6: lock-on candidates = gang + officers, refreshed at HUD rate
+      combat.hostiles = gangMembers.concat(police.officers.map((o) => o.person));
+      updateHeadlights();
+      // v8 adaptive music: calm on foot, engaged driving, danger
+      // at wanted >= 2 — layers crossfade on the audio side
+      audio.setMusicIntensity(state.mode !== 'playing' ? 0
+        : police.wanted >= 2 ? 2 : state.inCar ? 1 : 0);
+      // v6 (brief N): district splash on entry
+      const pp2 = state.inCar ? car.position : player.position;
+      const dn = zoneNameAt(pp2.x, pp2.z);
+      state.splashT -= 0.1;
+      if (dn !== state.district) {
+        if (state.district && state.splashT <= 0) hud.splash(dn);
+        state.district = dn;
+        state.splashT = 6;
+      }
       const pp = state.inCar ? car.position : player.position;
+      // v7: blips written into a reused array (stable element
+      // objects), never filter/map garbage at HUD rate
+      _blips.length = 0;
+      for (const p of pickups) {
+        if (p.taken) continue;
+        _blipPool[_blips.length].x = p.x;
+        _blipPool[_blips.length].z = p.z;
+        _blipPool[_blips.length].kind = p.kind;
+        _blips.push(_blipPool[_blips.length]);
+      }
       hud.drawMinimap(
         { x: pp.x, z: pp.z, heading: state.inCar ? car.rotation.y : state.heading },
         police.cars,
         missions.active && missions.current ? missions.current.target : null,
-        chaseTarget.visible ? chaseTarget : null
+        chaseTarget.visible ? chaseTarget : null,
+        _blips
       );
+    }
+    // v8 deep-testing guard: a NaN in the hero state poisons
+    // everything downstream silently — catch it at the boundary,
+    // recover to spawn, and count it so the soak test can assert 0
+    if (!Number.isFinite(player.position.x + player.position.z +
+        car.position.x + car.position.z + state.carSpeed + health.hp)) {
+      state.nanRecoveries += 1;
+      player.position.set(40.5, 0, 38.45);
+      state.footVel.x = 0; state.footVel.z = 0;
+      state.carSpeed = 0;
+      if (!Number.isFinite(health.hp)) health.hp = CFG.playerHealth;
+      if (state.inCar) startExit();
+      // the camera spring cannot recover from a NaN state either —
+      // reseed it behind the player
+      camera.position.set(player.position.x, 3, player.position.z + 6.5);
+      camVel.set(0, 0, 0);
+      camTarget.copy(player.position);
     }
   } else if (state.mode === 'title') {
     // slow orbit over the city vista — frozen for the staged title shot
@@ -1572,4 +2506,7 @@ window.__game = {
   state, missions, police, health, player, car, hud,
   traffic, peds, renderer, combat, flockCity, gulls,
   scene, camera, cityGroup, worldInfo, parked,
+  // v6 handles for the play-tests
+  gangMembers, pickups, courier, skidMarks, explosion,
+  damageCarFromHit, explodeCar,
 };

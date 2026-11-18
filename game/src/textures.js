@@ -38,12 +38,17 @@ export function shade(hex, f) {
 }
 
 // --- asphalt: dark grain, repair patches, cracks, oil stains ---
+// v6 (brief H): finer two-scale grain, tar-sealed crack snakes,
+// patched utility cuts and painted manhole covers baked in, so the
+// surface reads detailed at street level, not flat grey.
 export function asphaltTexture(rand) {
   return canvasTexture(512, 512, (ctx, w, h) => {
     ctx.fillStyle = PALETTE.asphalt;
     ctx.fillRect(0, 0, w, h);
     grain(ctx, w, h, rand, 9000, 0.05, true);
     grain(ctx, w, h, rand, 9000, 0.06, false);
+    grain(ctx, w, h, rand, 6000, 0.035, true);
+    grain(ctx, w, h, rand, 6000, 0.04, false);
     for (let i = 0; i < 7; i++) {
       ctx.fillStyle = PALETTE.asphaltPatch;
       ctx.globalAlpha = 0.5 + rand() * 0.3;
@@ -63,6 +68,28 @@ export function asphaltTexture(rand) {
       }
       ctx.stroke();
     }
+    // tar snakes: glossy black sealed cracks, wider than hairlines
+    ctx.strokeStyle = 'rgba(12,12,16,0.55)';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 3; i++) {
+      ctx.lineWidth = 3 + rand() * 3;
+      ctx.beginPath();
+      let x = rand() * w, y = rand() * h;
+      ctx.moveTo(x, y);
+      for (let j = 0; j < 4; j++) {
+        x += (rand() - 0.5) * 90;
+        y += (rand() - 0.5) * 90;
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    // utility cut: a straight-edged repair trench with a lighter fill
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    const ux = rand() * w * 0.7, uy = rand() * h * 0.7;
+    ctx.fillRect(ux, uy, 130, 26);
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ux, uy, 130, 26);
     for (let i = 0; i < 4; i++) {
       const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 30 + rand() * 40);
       g.addColorStop(0, 'rgba(10,10,14,0.35)');
@@ -73,19 +100,48 @@ export function asphaltTexture(rand) {
       ctx.fillRect(-80, -80, 160, 160);
       ctx.restore();
     }
+    // manhole covers: dark iron discs with a rim + grip dots
+    for (let i = 0; i < 2; i++) {
+      const mx = 60 + rand() * (w - 120), my = 60 + rand() * (h - 120);
+      ctx.fillStyle = '#2c2e33';
+      ctx.beginPath(); ctx.arc(mx, my, 21, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(mx, my, 21, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(200,205,215,0.28)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(mx, my, 15, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(200,205,215,0.30)';
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.arc(mx + Math.cos(a) * 9, my + Math.sin(a) * 9, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   });
 }
 
 // --- lane markings strip: dashed yellow centre + white edges ---
+// v6 (brief H): crisper paint — brighter, slightly worn dashes with
+// soft edge falloff and full-strength edge lines.
 export function laneTexture() {
   return canvasTexture(128, 512, (ctx, w, h) => {
     ctx.fillStyle = 'rgba(0,0,0,0)';
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = '#d8c86a';
-    ctx.fillRect(w / 2 - 3, 40, 6, 90);   // one dash per tile
-    ctx.fillStyle = 'rgba(240,240,230,0.9)';
+    // centre dash: bright worn yellow, one dash per tile
+    ctx.fillStyle = '#e8d06a';
+    ctx.fillRect(w / 2 - 3, 40, 6, 90);
+    ctx.fillStyle = 'rgba(59,62,68,0.35)';
+    ctx.fillRect(w / 2 - 3, 62, 6, 7);
+    ctx.fillRect(w / 2 - 3, 96, 6, 5);
+    // edge lines: solid, near-opaque white
+    ctx.fillStyle = 'rgba(245,245,238,0.95)';
     ctx.fillRect(4, 0, 4, h);
     ctx.fillRect(w - 8, 0, 4, h);
+    ctx.fillStyle = 'rgba(59,62,68,0.22)';
+    ctx.fillRect(4, 130, 4, 26);
+    ctx.fillRect(w - 8, 340, 4, 30);
   });
 }
 

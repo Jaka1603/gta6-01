@@ -1,4 +1,51 @@
 
+## v6 — PALMBAY HEAT, brief Jaka 18 Nov (audit total + sistem baru + skill v7/v8)
+Putaran terbesar sejauh ini: semua brief A–N dikerjakan, lalu seluruh build diaudit ulang terhadap skill threejs_game_craft yang baru di-upgrade (v7: disiplin JS hot-loop, input snapshot, FSM, feel numbers, deep testing; v8: bus audio + musik prosedural adaptif).
+
+**A. Audit bug total — daftar perbaikan (semua terverifikasi tes):**
+1. **Misi pantai tidak bisa dicapai (brief C, akarnya ketemu):** posisi pemain & mobil di-clamp ±208 di kedua sumbu, tapi target misi 1 di (−236, 60) dengan radius selesai 6 m — tidak terjangkau ±28 m selamanya. Tes v3 lolos palsu karena men-teleport pemain tepat ke target (clamp hanya berlaku saat bergerak). Clamp diperlebar (pemain x ≥ −246, mobil x ≥ −238), pagar promenade diberi celah gerbang di z 53..67, dan checkpoint dijangkar di PINTU beach bar baru.
+2. **Tembakan pemain tidak pernah kena sejak lama:** grup target raycast berisi Sprite glow mobil; `THREE.Sprite.raycast` membaca `raycaster.camera.matrixWorld` — camera tidak pernah di-set → TypeError di tengah traversal, hit hilang diam-diam. Suite lama hanya meng-assert amunisi, jadi bug ini lolos 3 versi. Fix: `raycaster.camera = camera` sebelum menembak.
+3. **Ray bidik kamera menukik ke tanah:** kamera follow pitch ke bawah (3 m di 6.5 m belakang) membuat ray tengah menyentuh tanah sebelum mencapai target berdiri 9–15 m — dada target ±1.1 m di atas ray, di luar toleransi lock 1 m. Fix: ray bidik konvergen ala TPS (titik dada 12 m di depan pemain); lock, magnetisme, dan tembakan manual semua memakai ray yang sama.
+4. **Label RUN→BRK lambat (satu-satunya FAIL mobile di baseline v5):** `refreshTouchUI()` hanya jalan di tick HUD 10 Hz; di SwiftShader ±1 fps label telat melewati batas tes. Sekarang dipanggil sinkron di startEnter/startExit.
+5. **Brawl gang dipanggil dengan argumen tertukar:** `updateBrawl(m, player, dt)` padahal signaturnya `(person, dt, rand)` — dt jadi objek pemain → posisi NaN. Sekalian callback onStrike: people.js mengirim PERSON, bukan angka damage — dua callback di main.js sempat membacanya sebagai damage (health jadi NaN). Health.damage/heal sekarang menolak nilai non-finite.
+6. **hurtPerson dibaca sebagai boolean:** ia mengembalikan string 'dead'|'stagger'|'ok' — 'ok' itu truthy, jadi cabang "korban melawan/melarikan diri" tidak pernah jalan. Diperbaiki di playerMelee + playerShoot.
+7. **Staging shot basi:** ?shot=chase men-start misi index 1 (sekarang FOLLOW, bukan THE CHASE) dan ?shot=mission index 2 (sekarang THE CHASE, bukan HOT DELIVERY) — digeser ke 2 & 3.
+8. **Tabel reward diperpanjang untuk 7 misi:** [400, 550, 650, 900, 1000, 1200, 2500] — HOT DELIVERY tetap 900 sesuai ekspektasi suite v3.
+
+**B. Kamera mengemudi:** follow SmoothDamp (smoothTime 0.34 mobil / 0.26 jalan) + lookahead kecepatan (mobil: arah × clamp(speed×0.32), jalan: footVel × 0.22). Ter-assert: jerk kamera maks 162–326 m/s³ (batas 900; snap akan terbaca ribuan).
+
+**C. Misi pantai bisa dimasuki:** beach bar dibangun penuh di ujung pier (deck, counter, botol, bangku, pintu, atap jerami, neon BEACH BAR) + regression test men-JALAN-kan pemain dari avenue ke trigger pintu sampai misi selesai.
+
+**D. Gerakan ditune ulang:** model kecepatan akselerasi (accel 42, decel 85, snap < 0.06), expo analog t^1.35, putar heading rate-limited 10.5 rad/s. Ter-assert: jarak berhenti dari lari penuh 0.51 m (batas 1.6), heading settle eksak dengan W ditahan (d=0.000 — bug circling v3 tidak kambuh), reversal W→S progresif (15 heading antara).
+
+**E. Menembak dua mode:** toggle di pause + indikator HUD; default AUTO di sentuh / MANUAL di desktop (ter-assert keduanya). AUTO: lock-on toleransi ray ≤ 1 m (spesifikasi pemilik) + LoS, ring merah di target, lock lepas setelah 0.3 s hilang. MANUAL: crosshair, magnetisme ≤ 2°. Senjata: 6 (fists, pistol, heavy pistol, SMG, shotgun 7 pelet, rifle) dengan stat berbeda.
+
+**F. Polisi menembak balik:** wanted ≥ 2 → perwira turun, jangkar 8–14 m, burst 2–4 tembakan (jeda 0.9–1.6 s, stagger per indeks, akurasi mengencang per tembakan), tracer + muzzle flash, damage 4–8 HP. Wanted 1: tinju saja (ter-assert dua arah: tidak ada tembakan di wanted 1, perwira brawl saat dekat).
+
+**G. Daya tahan kendaraan:** HP per gaya (sedan 100, SUV 125, pickup 135, van 150, hero 120); peluru −6..10, tabrakan −5..20; tahap asap tipis → asap gelap + api mesin + tenaga −30% → LEDAKAN (flash, damage radial 40–60 dalam 4 m, rantai 50%, trauma kamera, bangkai menghitam, api 2–3 dtk). Di dalam mobil terbakar: DoT 6/dtk + prompt ACT berkedip "MOBIL TERBAKAR — KELUAR!".
+
+**H. Jalan:** tekstur aspal dua skala + retak tar-snake + parit perbaikan + 2 tutup manhole per tile; garis lajur kuning aus lebih crisp + garis tepi nyaris solid.
+
+**I. Semua bangunan berpintu:** 112 pintu ter-instanced (frame + panel + kenop) di 50 blok — komersial + residensial, tanpa kotak polos lagi.
+
+**J+K. Rumah + interior berperabot:** distrik residensial (rumah kecil/sedang, atap piramida bervariasi, taman/pagar/semak) + **3 rumah bisa dimasuki** lewat pintunya (pintu berengsel membuka saat didekati). Interior berperabot lengkap — 14 prop per rumah: rug, sofa, meja kopi, TV emisif, lampu lantai, tanaman, lukisan, counter dapur, kulkas, kompor, meja makan + 4 kursi, tempat tidur, lemari, nakas + lampu. Interior = 1 mesh gabungan + TV; render hanya saat pemain dekat; atap + dinding jauh sembunyi saat di dalam. Satu rumah menyembunyikan pickup SMG. Ter-assert walk-in penuh.
+
+**L. Pickup senjata:** SMG (interior rumah), shotgun (pantai), rifle (gang), heavy pistol (pelabuhan) + 5 pickup health (salib hijau). Walk-over/ACT untuk mengambil; magnet pickup (v7) menarik dari ±3 m; HUD menampilkan nama + amunisi; WPN memutar senjata yang DIMILIKI; semua tersimpan di localStorage (ter-assert save berisi arsenal).
+
+**M. Tinju:** pukulan pemain solid (hitstop 45 ms); NPC membalas dengan brawl penuh (mendekat, memukul, stagger, kabur saat kalah); polisi tinju di wanted 1; label status AI eksplisit per figur: walk|flee|brawl|knock|dead.
+
+**N. Dari video referensi:** kartu dialog potret Mama Rosa sebelum/sesudah misi (NEXT/SKIP, dunia tetap idle), kartu judul misi, banner CHECKPOINT, SUCCESS + popup "+$" melayang + toast "💾 SAVED", persist cash/misi/senjata, DUA tipe misi baru — FOLLOW (TAIL THE COURIER, jaga jarak 4–32 m) & DELIVERY (SPECIAL DELIVERY ke pintu Mama Rosa's), splash nama distrik (Beachfront, Downtown, The Palms, Harbor, Midtown, Old Town), pickup health, ribbon skid mark (ring buffer 600 segmen, 1 draw call), kerucut cahaya lampu depan untuk ±8 mobil terdekat.
+
+**Skill v7/v8 yang diterapkan (audit putaran kedua):** RNG gameplay satu stream terseed (`gameRand`, tanpa Math.random di kode sim); input snapshot `state.input` (keyboard + sentuh menulis sumbu yang sama, sim hanya membaca snapshot); hitstop 30–90 ms; shake model trauma (amplitudo = trauma², decay 1.4/s, termasuk roll ≤ 0.7°); sub-step pergerakan mobil (≤ 1.1 m/sub-step — kasus uji max-speed menabrak dinding rumah lolos); zero-alloc di jalur panas (vektor scratch ter-pool di police/combat/main, blip minimap ter-pool, iterasi damage mobil tanpa array per frame); bentuk objek stabil (field flame/smokeT sejak konstruksi); NaN guard di batas sim (pemain pulih ke spawn + kamera di-reseed + penghitung untuk tes); audio 3 bus + compressor master, musik prosedural Am–F–C–G 104 BPM (pad+bass selalu, arp saat engaged, kit saat danger, ganti intensitas hanya di batas bar), ducking −6 dB saat ledakan, variasi pitch ±5%, cap 14 voice.
+
+**Pengecualian skill yang disengaja (dengan alasan):** (1) Fixed-timestep penuh + interpolasi render TIDAK di-retrofit — loop tetap dt variabel ter-clamp 0.05; determinisme dijamin di tempat yang penting (RNG world terseed, preroll shot fixed-step, gameRand); me-retrofit akan membatalkan semua konstanta rasa + asumsi timing 4 suite lama. (2) Spatial hash TIDAK dipasang — hitungan entitas kecil (±200 rect statis, ±45 mobil, ±40 pejalan; ±1.600 uji AABB/frame itu trivial) dan rect bangunan statis; broadphase tidak memberi gain terukur di skala ini. (3) Coyote time tidak relevan (tidak ada lompat); input buffer hadir sebagai antrean ACT saat transisi (exitQueued). (4) Dealer minigame + toko pakaian DILEWATI sesuai brief (kandidat v7).
+
+**Batas yang diketahui:** tembakan manual di atas ±25 m menukik mengikuti ray konvergen (magnetisme 2° menolong untuk hostile); perwira hanya 2 (mengikuti batas perf v3); interior tanpa langit-langit (kamera follow tidak pernah melihatnya — trik standar); pickup brief "rooftop" diganti titik gang/pelabuhan karena tidak ada mekanik memanjat.
+
+**Tes (semua hijau, 0 error konsol/halaman):** playtest-gta6-v3 39/39 · playtest-mobile 20/20 · playtest-gta6-v4 19/19 · playtest-gta6-v5 60/60 · playtest-gta6-v6 BARU 50/50 (desktop 46 + mobile 4) — total 188 assert. Draw call dalam game: desktop 323, mobile 588 (batas ~700 ✓). Suite v6: ~/workspace/makefun/shottools/playtest-gta6-v6.mjs. Tiga koreksi terjustifikasi di suite v3 (target misi 1 dibaca live, bukan hardcode (−236,60) yang sekarang di dalam rect bar; ambang audit marker ≥6 → ≥0.4 karena checkpoint kini di pintu — invarian yang benar adalah "di luar semua footprint + margin push-out"; index HEAT ESCAPE dicari via flag escape, bukan posisi).
+**Screenshot v6:** screenshots/1-cover.jpg (chase), 2-beach.jpg (misi bar pantai + pilar checkpoint di pintu), 3-interior.jpg (interior berperabot), 4-shootout.jpg (baku tembak geng + polisi), 5-skid.jpg (drift + skid mark), 6-mission.jpg (kartu judul + timer), 7-foot.jpg (promenade + anjing), 8-title.jpg, 9-car.jpg (pintu berengsel terbuka), 10-mobile.jpg (portrait sentuh).
+**Recording:** perekam v6 dari sesi utama (01a1edf2…) berjalan selama build ini; penyegelan, push & submit = langkah agen utama (belum push, belum submit — menunggu Jaka lihat dulu).
+
 ## v5 — PALMBAY HEAT, putaran feedback HP Jaka (18 Nov)
 Tujuh perbaikan dari play-test HP Jaka + 2 amendemen (skema kontrol GTA mobile dari video referensi; alur masuk/keluar mobil ala Pure Crime):
 
