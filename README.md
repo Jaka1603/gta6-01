@@ -24,6 +24,15 @@ Then open <http://localhost:8080>. Or serve the `game/` folder with any static f
 - **Shift** — sprint
 - **P** — pause
 
+### Touch controls (phone / tablet)
+
+- **Left stick** — walk / drive (push to the edge to sprint on foot)
+- **ATK / FIRE** — punch / shoot (tap again when empty to reload)
+- **ACT** — enter / exit a car
+- **RUN / BRK** — sprint on foot, brake in a car
+- **WPN** — switch fists / pistol
+- **❚❚ / FULL** — pause, and fullscreen + landscape lock
+
 ## Features
 
 - Procedural city: streets, buildings, traffic, and pedestrians
@@ -33,6 +42,7 @@ Then open <http://localhost:8080>. Or serve the `game/` folder with any static f
 - HUD + minimap, mission tracker, and cash display
 - Save / continue progress
 - Synthesized sound effects and music via WebAudio (no audio files)
+- Playable on phones and tablets: virtual joystick + action buttons, compact HUD, safe-area layout, and a lighter mobile render load (capped pixel ratio, smaller shadow map)
 
 ## v2 visual polish (San Andreas-class)
 

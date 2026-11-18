@@ -2,12 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <link rel="icon" href="data:,">
 <title>PALMBAY HEAT — an open-world crime game</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1420;
-    font-family: 'Trebuchet MS', Verdana, sans-serif; color: #fff; }
+    font-family: 'Trebuchet MS', Verdana, sans-serif; color: #fff;
+    overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
@@ -45,6 +47,58 @@
   .phone .msg { background: rgba(15,20,35,.88); border: 1px solid #4a6a8a; border-radius: 10px;
     padding: 8px 12px; font-size: 14px; }
   .phone .msg b { display: block; color: #7dd8ff; margin-bottom: 2px; }
+
+  /* ---------- Touch controls (HP / tablet) ---------- */
+  #touch-controls { position: fixed; inset: 0; z-index: 30; display: none;
+    pointer-events: none; }
+  body.touch #touch-controls { display: block; }
+  .touch-btn { pointer-events: auto; touch-action: none; border: 2px solid rgba(255,255,255,.65);
+    background: rgba(12,16,28,.58); color: #fff; border-radius: 999px;
+    font-family: inherit; font-weight: bold; letter-spacing: 1px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.35); backdrop-filter: blur(3px); }
+  .touch-btn.active, .touch-btn:active { background: rgba(255,150,50,.78);
+    border-color: #ffd23f; transform: scale(.96); }
+  #touch-top { position: absolute; top: calc(10px + env(safe-area-inset-top));
+    left: 50%; transform: translateX(-50%); display: flex; gap: 8px; }
+  #touch-top .touch-btn { min-width: 52px; height: 38px; padding: 0 12px; font-size: 13px; }
+  #stick { display: none; position: absolute; left: calc(16px + env(safe-area-inset-left));
+    bottom: calc(142px + env(safe-area-inset-bottom)); width: 128px; height: 128px;
+    border-radius: 50%; border: 2px solid rgba(255,255,255,.45);
+    background: radial-gradient(circle, rgba(255,255,255,.10), rgba(0,0,0,.38));
+    pointer-events: auto; touch-action: none; }
+  #stick-knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px;
+    border-radius: 50%; background: rgba(255,210,63,.82); border: 2px solid rgba(0,0,0,.35);
+    transform: translate(-50%, -50%); box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+  #touch-actions { display: none; position: absolute; right: calc(16px + env(safe-area-inset-right));
+    bottom: calc(26px + env(safe-area-inset-bottom)); width: 178px; height: 178px; }
+  body.in-game #stick, body.in-game #touch-actions { display: block; }
+  #touch-actions .touch-btn { position: absolute; width: 62px; height: 62px; font-size: 14px; }
+  #btn-atk { right: 0; bottom: 0; width: 82px !important; height: 82px !important;
+    font-size: 18px !important; background: rgba(190,45,35,.68); }
+  #btn-run { right: 94px; bottom: 8px; }
+  #btn-act { right: 8px; bottom: 94px; }
+  #btn-weapon { right: 94px; bottom: 94px; }
+  body.touch .minimap { width: 112px; height: 112px; left: 12px; bottom: 12px; }
+  body.touch .speed { bottom: calc(218px + env(safe-area-inset-bottom)); }
+  body.touch .bust { bottom: calc(252px + env(safe-area-inset-bottom)); }
+  body.touch .phone { bottom: calc(292px + env(safe-area-inset-bottom)); width: 240px; }
+  @media (max-width: 700px) {
+    .cash { top: 10px; right: 12px; font-size: 22px; }
+    .clock { top: 40px; right: 12px; font-size: 13px; }
+    .health { top: 62px; right: 12px; font-size: 13px; }
+    .health .bar { width: 84px; }
+    .weapon { top: 88px; right: 12px; font-size: 13px; }
+    .stars { top: 116px; right: 12px; font-size: 20px; }
+    .objective { max-width: 54vw; font-size: 13px; }
+    .zone { max-width: 54vw; font-size: 12px; }
+    .center b { font-size: 27px; }
+    .center span { font-size: 15px; }
+    .logo { font-size: 42px; letter-spacing: 3px; }
+    .logo small { font-size: 15px; letter-spacing: 6px; }
+    .panel { padding: 20px 14px; }
+    .menu button { width: min(320px, 84vw); }
+    .controls { font-size: 12px; line-height: 1.75; }
+  }
 
   /* ---------- Title / end / pause ---------- */
   .overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
@@ -87,7 +141,9 @@
       <b>W A S D</b> — walk / drive &nbsp;·&nbsp; <b>SHIFT</b> — run<br>
       <b>E</b> — enter / exit car (steal parked cars!) &nbsp;·&nbsp; <b>SPACE</b> — brake<br>
       <b>F</b> — punch &nbsp;·&nbsp; <b>CLICK</b> — shoot &nbsp;·&nbsp; <b>1 / 2</b> — fists / pistol &nbsp;·&nbsp; <b>R</b> — reload<br>
-      <b>P / ESC</b> — pause &nbsp;·&nbsp; <b>M</b> — mute
+      <b>P / ESC</b> — pause &nbsp;·&nbsp; <b>M</b> — mute<br>
+      <b>TOUCH</b> — left stick to move / drive · <b>ATK</b> punch / shoot ·
+      <b>ACT</b> enter car · <b>RUN</b> sprint / <b>BRK</b> brake
     </div>
     <p id="save-line"></p>
   </div>
@@ -108,6 +164,20 @@
   <div class="panel">
     <h1 class="logo" style="font-size:44px">PAUSED</h1>
     <p class="tagline">Palm Bay waits for no one. Press P to keep driving.</p>
+  </div>
+</div>
+
+<div id="touch-controls" aria-label="Touch controls">
+  <div id="touch-top">
+    <button class="touch-btn" id="btn-pause" type="button">❚❚</button>
+    <button class="touch-btn" id="btn-full" type="button">FULL</button>
+  </div>
+  <div id="stick"><div id="stick-knob"></div></div>
+  <div id="touch-actions">
+    <button class="touch-btn" id="btn-weapon" type="button">WPN</button>
+    <button class="touch-btn" id="btn-act" type="button">ACT</button>
+    <button class="touch-btn" id="btn-run" type="button">RUN</button>
+    <button class="touch-btn" id="btn-atk" type="button">ATK</button>
   </div>
 </div>
 

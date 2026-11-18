@@ -29,13 +29,20 @@ const SAVE_KEY = 'palmbay-heat-save-v1';
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot');           // chase | foot | mission | title | null
 const SEED = parseInt(params.get('seed') || '1', 10) || 1;
+// Mobile play: coarse pointers / touchscreens get a virtual stick,
+// action buttons and a lighter render load. ?touch=1 forces the UI
+// on (desktop testing + mobile screenshots).
+const IS_TOUCH = params.get('touch') === '1' ||
+  (window.matchMedia && matchMedia('(pointer: coarse)').matches) ||
+  navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+if (IS_TOUCH) document.body.classList.add('touch');
 
 const rand = rng(SEED * 7919 + 13);
 
 // ---------- renderer / scene ----------
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(SHOT ? 1 : Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(SHOT ? 1 : Math.min(devicePixelRatio, IS_TOUCH ? 1.75 : 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -94,7 +101,7 @@ camera.position.set(0, 40, 90);
 // hemisphere fill so shadow sides stay readable and teal-tinted.
 const sun = new THREE.DirectionalLight(CFG.sunColor, CFG.sunIntensity);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(IS_TOUCH ? 1024 : 2048, IS_TOUCH ? 1024 : 2048);
 const SHADOW_S = 55;
 Object.assign(sun.shadow.camera, {
   left: -SHADOW_S, right: SHADOW_S,
@@ -110,7 +117,7 @@ const _sv = new THREE.Vector3();
 function updateSun(playerPos) {
   _sv.copy(playerPos).addScaledVector(SUN_DIR, 120);
   // snap to the shadow-texel grid so shadows don't shimmer while moving
-  const texel = (SHADOW_S * 2) / 2048;
+  const texel = (SHADOW_S * 2) / sun.shadow.mapSize.x;
   _sv.x = Math.round(_sv.x / texel) * texel;
   _sv.z = Math.round(_sv.z / texel) * texel;
   sun.position.copy(_sv);
@@ -180,6 +187,7 @@ const state = {
   time: 0,
   clockMin: 1110,       // 18:30 — golden hour, fixed for the look
   camYaw: 0,
+  camOffset: 0,         // v4: touch camera-drag orbit offset (radians)
   shotReady: false,
   exhaustT: 0,
   skidT: 0,
@@ -252,6 +260,7 @@ const pauseEl = document.getElementById('pause');
 
 function showTitle() {
   state.mode = 'title';
+  document.body.classList.remove('in-game');
   document.getElementById('hud').classList.add('hidden');
   titleEl.classList.remove('hidden');
   endEl.classList.add('hidden');
@@ -264,6 +273,7 @@ function showTitle() {
 }
 function startGame(fromSave) {
   audio.ensure();
+  document.body.classList.add('in-game');
   titleEl.classList.add('hidden');
   document.getElementById('hud').classList.remove('hidden');
   endEl.classList.add('hidden');
@@ -301,6 +311,7 @@ document.getElementById('btn-retry').addEventListener('click', () => {
   player.position.set(30, 0, 30);
   endEl.classList.add('hidden');
   state.mode = 'playing';
+  document.body.classList.add('in-game');
   missions.start(missions.index);
   syncHUD();
 });
@@ -352,30 +363,19 @@ missions.onEvent = (type, payload) => {
 };
 
 // ---------- input ----------
-addEventListener('keydown', (e) => {
-  state.keys[e.code] = true;
-  audio.ensure();
-  if (e.code === 'KeyM') audio.toggleMute();
-  if (e.code === 'KeyP' || e.code === 'Escape') {
-    if (state.mode === 'playing') { state.mode = 'paused'; pauseEl.classList.remove('hidden'); }
-    else if (state.mode === 'paused') { state.mode = 'playing'; pauseEl.classList.add('hidden'); }
-  }
-  if (e.code === 'KeyE' && state.mode === 'playing') tryEnterExitCar();
-  if (e.code === 'KeyF' && state.mode === 'playing' && !state.inCar) {
-    combat.melee(player.position, state.heading, peds.peds, (p) => {
-      peds.fleeFrom(p.position.x, p.position.z, 12);
-      police.addWanted(1);
-    });
-  }
-  if (e.code === 'Digit1' && state.mode === 'playing') { combat.setWeapon('fists'); syncHUD(); }
-  if (e.code === 'Digit2' && state.mode === 'playing') { combat.setWeapon('pistol'); syncHUD(); }
-  if (e.code === 'KeyR' && state.mode === 'playing') {
-    if (combat.weapon === 'pistol') { combat.ammo = 12; hud.center('RELOAD', '12 peluru'); }
-  }
-});
-addEventListener('keyup', (e) => { state.keys[e.code] = false; });
-addEventListener('mousedown', (e) => {
-  if (state.mode !== 'playing' || state.inCar || e.button !== 0) return;
+function togglePause() {
+  if (state.mode === 'playing') { state.mode = 'paused'; pauseEl.classList.remove('hidden'); }
+  else if (state.mode === 'paused') { state.mode = 'playing'; pauseEl.classList.add('hidden'); }
+}
+function playerMelee() {
+  if (state.mode !== 'playing' || state.inCar) return;
+  combat.melee(player.position, state.heading, peds.peds, (p) => {
+    peds.fleeFrom(p.position.x, p.position.z, 12);
+    police.addWanted(1);
+  });
+}
+function playerShoot() {
+  if (state.mode !== 'playing' || state.inCar) return;
   audio.ensure();
   // v3 audit: the city is a raycast target too — shots now stop at
   // walls instead of passing through buildings to hit peds behind
@@ -387,11 +387,202 @@ addEventListener('mousedown', (e) => {
     }
   });
   if (res === 'hit' || res === 'miss') syncHUD();
+}
+function reloadPistol() {
+  if (state.mode !== 'playing' || combat.weapon !== 'pistol') return;
+  combat.ammo = 12;
+  hud.center('RELOAD', '12 peluru');
+  syncHUD();
+}
+function playerAttack() {
+  if (state.mode !== 'playing' || state.inCar) return;
+  audio.ensure();
+  if (combat.weapon === 'pistol') {
+    if (combat.ammo <= 0) reloadPistol();
+    else playerShoot();
+  } else playerMelee();
+}
+function cycleWeapon() {
+  if (state.mode !== 'playing' || state.inCar) return;
+  combat.setWeapon(combat.weapon === 'pistol' ? 'fists' : 'pistol');
+  syncHUD();
+}
+addEventListener('keydown', (e) => {
+  state.keys[e.code] = true;
+  audio.ensure();
+  if (e.code === 'KeyM') audio.toggleMute();
+  if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
+  if (e.code === 'KeyE' && state.mode === 'playing') tryEnterExitCar();
+  if (e.code === 'KeyF' && state.mode === 'playing') playerMelee();
+  if (e.code === 'Digit1' && state.mode === 'playing') { combat.setWeapon('fists'); syncHUD(); }
+  if (e.code === 'Digit2' && state.mode === 'playing') { combat.setWeapon('pistol'); syncHUD(); }
+  if (e.code === 'KeyR' && state.mode === 'playing') reloadPistol();
+});
+addEventListener('keyup', (e) => { state.keys[e.code] = false; });
+addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  // taps on the touch UI / menus must never fire the pistol, and the
+  // compatibility mouse event after a touch tap must not double-fire
+  if (e.target && e.target.closest && e.target.closest('#touch-controls, .overlay')) return;
+  if (performance.now() - touchTapAt < 700) return;
+  playerShoot();
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- touch controls ----------
+// The stick and buttons feed the SAME state.keys the keyboard uses,
+// so on-foot walking, driving, braking and sprinting all reuse the
+// tested update code — touch only translates fingers into keys and
+// taps into the existing action functions.
+let touchTapAt = 0;
+let stickPointer = null;
+let stickSprint = false;
+let runHeld = false;
+const stickEl = document.getElementById('stick');
+const knobEl = document.getElementById('stick-knob');
+const runBtn = document.getElementById('btn-run');
+const atkBtn = document.getElementById('btn-atk');
+
+function setKey(code, on) { state.keys[code] = !!on; }
+function syncHoldKeys() {
+  if (state.inCar) {
+    state.keys['Space'] = runHeld;      // RUN button becomes the brake
+    state.keys['ShiftLeft'] = false;
+    state.keys['ShiftRight'] = false;
+  } else {
+    state.keys['ShiftLeft'] = runHeld || stickSprint;
+    state.keys['Space'] = false;
+  }
+}
+function refreshTouchUI() {
+  if (!document.body.classList.contains('touch')) return;
+  const label = state.inCar ? 'BRK' : 'RUN';
+  if (runBtn.textContent !== label) runBtn.textContent = label;
+  const atk = state.inCar ? '···' : (combat.weapon === 'pistol' ? 'FIRE' : 'ATK');
+  if (atkBtn.textContent !== atk) atkBtn.textContent = atk;
+}
+function stickMove(e) {
+  const r = stickEl.getBoundingClientRect();
+  let dx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+  let dy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+  const len = Math.hypot(dx, dy);
+  if (len > 1) { dx /= len; dy /= len; }
+  knobEl.style.transform =
+    'translate(-50%, -50%) translate(' + (dx * 36) + 'px, ' + (dy * 36) + 'px)';
+  const dead = 0.24;
+  setKey('KeyW', dy < -dead);
+  setKey('KeyS', dy > dead);
+  setKey('KeyA', dx < -dead);
+  setKey('KeyD', dx > dead);
+  stickSprint = Math.min(1, len) > 0.93;
+  syncHoldKeys();
+}
+function stickEnd() {
+  stickPointer = null;
+  knobEl.style.transform = 'translate(-50%, -50%)';
+  setKey('KeyW', false);
+  setKey('KeyS', false);
+  setKey('KeyA', false);
+  setKey('KeyD', false);
+  stickSprint = false;
+  syncHoldKeys();
+}
+stickEl.addEventListener('pointerdown', (e) => {
+  touchTapAt = performance.now();
+  stickPointer = e.pointerId;
+  try { stickEl.setPointerCapture(e.pointerId); } catch {}
+  audio.ensure();
+  stickMove(e);
+  e.preventDefault();
+});
+stickEl.addEventListener('pointermove', (e) => {
+  if (e.pointerId === stickPointer) stickMove(e);
+});
+stickEl.addEventListener('pointerup', stickEnd);
+stickEl.addEventListener('pointercancel', stickEnd);
+
+function bindTap(id, on, off) {
+  const el = document.getElementById(id);
+  el.addEventListener('pointerdown', (e) => {
+    touchTapAt = performance.now();
+    audio.ensure();
+    el.classList.add('active');
+    if (on) on();
+    e.preventDefault();
+  });
+  const end = (e) => {
+    el.classList.remove('active');
+    if (off) off();
+    if (e) e.preventDefault();
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('pointerleave', end);
+  return el;
+}
+bindTap('btn-atk', () => playerAttack());
+bindTap('btn-act', () => {
+  if (state.mode === 'playing') tryEnterExitCar();
+  syncHoldKeys();
+});
+bindTap('btn-weapon', () => cycleWeapon());
+bindTap('btn-run',
+  () => { runHeld = true; syncHoldKeys(); },
+  () => { runHeld = false; syncHoldKeys(); });
+bindTap('btn-pause', () => togglePause());
+bindTap('btn-full', () => {
+  try {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else {
+      const p = document.documentElement.requestFullscreen();
+      if (p && p.catch) p.catch(() => {});
+      if (screen.orientation && screen.orientation.lock) {
+        const q = screen.orientation.lock('landscape');
+        if (q && q.catch) q.catch(() => {});
+      }
+    }
+  } catch {}
+});
+// camera drag (v4, merged): a touch that starts on open canvas on
+// the right half of the screen orbits the follow camera — the drag
+// accumulates into state.camOffset, which updateCamera folds into
+// its target yaw, so the view swings without fighting the follow
+// logic. Touches on the stick / buttons never reach the canvas, and
+// mouse play is untouched (touch pointers only).
+let camPointer = null;
+let camLastX = 0;
+addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'touch') return;
+  if (state.mode !== 'playing') return;
+  if (e.target !== canvas) return;
+  if (e.clientX < innerWidth * 0.45) return;
+  camPointer = e.pointerId;
+  camLastX = e.clientX;
+});
+addEventListener('pointermove', (e) => {
+  if (e.pointerId !== camPointer) return;
+  state.camOffset += (e.clientX - camLastX) * 0.0055;
+  camLastX = e.clientX;
+});
+const camDragEnd = (e) => { if (e.pointerId === camPointer) camPointer = null; };
+addEventListener('pointerup', camDragEnd);
+addEventListener('pointercancel', camDragEnd);
+// a real touch on a device that did not advertise one still gets UI
+addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') {
+    document.body.classList.add('touch');
+    touchTapAt = performance.now();
+  }
+}, { passive: true });
+// never leave a virtual key stuck when the tab loses focus
+addEventListener('blur', () => {
+  stickEnd();
+  runHeld = false;
+  syncHoldKeys();
 });
 
 // ---------- enter / exit car ----------
@@ -450,7 +641,9 @@ function tryEnterExitCar() {
     car.userData.maxSpeed = c.userData.maxSpeed || CFG.carMax;
   }
   audio.play('chime');
-  hud.center('MASUK MOBIL', 'WASD mengemudi · E keluar · Spasi rem');
+  hud.center('MASUK MOBIL', IS_TOUCH
+    ? 'Stick mengemudi · ACT keluar · BRK rem'
+    : 'WASD mengemudi · E keluar · Spasi rem');
 }
 
 // ---------- HUD sync ----------
@@ -478,6 +671,7 @@ function syncHUD() {
     hud.setObjective('');
     hud.setTimer(0);
   }
+  refreshTouchUI();
 }
 
 // ---------- per-frame update ----------
@@ -643,7 +837,7 @@ function updateCamera(dt) {
   }
   const heading = state.inCar ? car.rotation.y : state.heading;
   // camera yaw follows behind the focus
-  const wantYaw = heading + Math.PI;
+  const wantYaw = heading + Math.PI + state.camOffset;
   let dy = wantYaw - state.camYaw;
   while (dy > Math.PI) dy -= TAU;
   while (dy < -Math.PI) dy += TAU;
@@ -664,6 +858,7 @@ function updateCamera(dt) {
 // ---------- busted / wasted ----------
 function showEnd(kind) {
   state.mode = kind;
+  document.body.classList.remove('in-game');
   audio.play(kind);
   endEl.classList.remove('hidden');
   if (kind === 'busted') {
