@@ -1,7 +1,9 @@
-// PALMBAY HEAT — combat.js (v2): melee + shooting (raycast, pooled
+// PALMBAY HEAT — combat.js (v3): melee + shooting (raycast, pooled
 // muzzle flash, impact sparks, smoke), NPC reactions. The pistol is a
 // real mesh in the player's right hand; firing shows a glow flash, a
 // star burst and a point-light spike, and impacts throw pooled sparks.
+// v3 audit: the shot raycast is range-capped (it used to hit targets
+// at any distance, through the whole city).
 const THREE = window.THREE;
 import { CFG, clamp } from './config.js';
 import { MuzzleFlash, Sparks, Smoke } from './effects.js';
@@ -16,6 +18,7 @@ export class Combat {
     this.cooldown = 0;
     this.player = null;
     this.raycaster = new THREE.Raycaster();
+    this.raycaster.far = 120;   // pistol range — no cross-city hits
     this.flash = new MuzzleFlash(scene);
     this.sparks = new Sparks(scene);
     this.smoke = new Smoke(scene);

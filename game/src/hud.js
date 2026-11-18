@@ -1,8 +1,11 @@
-// PALMBAY HEAT — hud.js (v2): DOM HUD (cash, health, wanted stars,
+// PALMBAY HEAT — hud.js (v3): DOM HUD (cash, health, wanted stars,
 // weapon, objective, sunset clock) + 2D minimap canvas + phone popups.
 // The minimap is drawn from the SAME city layout data as the 3D world
 // (worldInfo.blocks + road lines), so streets and blocks read true:
 // blocks grey, roads dark, water teal, beach sand, gang turf green.
+// v3 audit: the player arrow was mirrored (it pointed south while the
+// player faced north) and the sea/beach bands sat ~30 m east of the
+// real shoreline — both now drawn from world-true coordinates.
 import { CFG, clamp } from './config.js';
 import { roadCoord, worldInfo } from './world.js';
 
@@ -123,12 +126,15 @@ export class HUD {
     ctx.fillStyle = 'rgba(20, 28, 40, 0.85)';
     ctx.fillRect(0, 0, S, S);
     const toMap = (x, z) => [S / 2 + x * scale, S / 2 + z * scale];
-    // sea (west)
+    // sea + beach at their true world x bands: water west of -245,
+    // sand -250..-210 (the avenue covers the rest of the strip)
+    const [seaEdge] = toMap(-245, 0);
+    const [sandW] = toMap(-250, 0);
+    const [sandE] = toMap(-210, 0);
     ctx.fillStyle = '#2a6a8a';
-    ctx.fillRect(0, 0, S / 2 - HALF * scale, S);
-    // beach
+    ctx.fillRect(0, 0, Math.max(0, seaEdge), S);
     ctx.fillStyle = '#e8c890';
-    ctx.fillRect(S / 2 - HALF * scale, 0, 16, S);
+    ctx.fillRect(Math.max(0, sandW), 0, sandE - Math.max(0, sandW), S);
     // gang turf tint (green wash over those blocks)
     const gt = worldInfo.gangTurf;
     if (gt) {
@@ -174,11 +180,12 @@ export class HUD {
       ctx.fillStyle = '#ff4040';
       ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
     }
-    // player arrow
+    // player arrow — canvas rotation is π − heading: the map's +z
+    // points DOWN the canvas, so a raw heading mirrors the arrow
     const [px, py] = toMap(player.x, player.z);
     ctx.save();
     ctx.translate(px, py);
-    ctx.rotate(player.heading);
+    ctx.rotate(Math.PI - player.heading);
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = '#222';
     ctx.lineWidth = 1.5;

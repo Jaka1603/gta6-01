@@ -43,6 +43,15 @@ Then open <http://localhost:8080>. Or serve the `game/` folder with any static f
 - Ambient life: bird flocks in V formation, seagulls over the pier, a dog that follows a pedestrian, a cat that crosses the road
 - Red convertible hero car with interior, seats, plates and racing stripes; brake lights, headlight glow, exhaust puffs
 
+## v3 review fixes (Jaka's list)
+
+- Natural trees everywhere: tapered trunks + layered rounded canopies (no more palm spikes), placed by a validating builder — zero trees inside buildings (≥1.5 m clearance) and zero on roads
+- Street lamps every ~28 m with warm emissive heads and glow, instanced for performance
+- Sidewalks stop at junctions instead of painting across them; zebra crossings on every leg of every intersection
+- Traffic lights at avenue junctions, stop signs at minor ones, benches along sidewalks and the promenade
+- Every citizen rebuilt as a LEGO-style minifigure: studded cylindrical head, printed smile, printed torso details (police badge, gang chain, civil prints), C-shaped hands
+- Full bug-audit pass: building collision for player/cars/police, mission-flow fixes (the escape mission now raises its 3 stars; the chase needs its 3 rams), traffic lane discipline, parked cars at real curbs, occlusion-correct shooting, corrected minimap arrow and shoreline
+
 ## Screenshots
 
 - [Cover — Palm Bay at dusk](screenshots/1-cover.jpg)

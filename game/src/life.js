@@ -1,10 +1,13 @@
-// PALMBAY HEAT — life.js (v2): the ambient life pass. Birds in V
+// PALMBAY HEAT — life.js (v3): the ambient life pass. Birds in V
 // formation crossing the sky, seagulls circling the pier, a dog that
 // follows a pedestrian, a cat that crosses the road now and then, and
 // slow-drifting clouds. All motion is delta-time based and seeded, so a
 // fixed-step pre-roll puts the same life in the same place every run.
+// v3 audit: the cat's crossing span now uses the crossed road's real
+// half-width — on avenues it used to start/end inside the asphalt.
 const THREE = window.THREE;
 import { CFG, TAU, clamp } from './config.js';
+import { roadHalfAt } from './world.js';
 
 // --- one bird: cone body + two flapping wing planes ---
 function makeBird(color = 0x22242a) {
@@ -192,16 +195,18 @@ export class CrossingCat {
     if (!this.active) {
       this.timer -= dt;
       if (this.timer <= 0) {
-        // pick a road line, cross it at a random point
+        // pick a road line, cross it at a random point — from just
+        // past one curb to just past the other (avenues included)
         const vertical = this.rand() < 0.5;
         const line = -210 + Math.floor(this.rand() * 8) * 60;
+        const span = roadHalfAt(line) + 2;
         const along = (this.rand() * 2 - 1) * 180;
         if (vertical) {
-          this.from.set(line - 9, 0, along);
-          this.to.set(line + 9, 0, along);
+          this.from.set(line - span, 0, along);
+          this.to.set(line + span, 0, along);
         } else {
-          this.from.set(along, 0, line - 9);
-          this.to.set(along, 0, line + 9);
+          this.from.set(along, 0, line - span);
+          this.to.set(along, 0, line + span);
         }
         this.cat.position.copy(this.from);
         this.cat.rotation.y = Math.atan2(

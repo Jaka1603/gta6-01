@@ -1,8 +1,9 @@
-// PALMBAY HEAT — config.js (v2): palette + scale tables, city layout,
+// PALMBAY HEAT — config.js (v3): palette + scale tables, city layout,
 // tuning. ONE art direction for the whole game: every builder reads
 // PALETTE / SCALE below — no per-object improvised colours or sizes.
 // San Andreas benchmark: warm orange->teal sunset, textured surfaces,
-// door 2.1 m, car ~4.4 m, palm 7-10 m.
+// door 2.1 m, car ~4.4 m, tree 7-10 m. v3: natural layered-canopy
+// trees, LEGO minifigure people, validated street furniture.
 export const PALETTE = {
   // sky / atmosphere (fog colour MUST equal the horizon colour)
   skyTop: 0x2f6db3,
@@ -23,10 +24,23 @@ export const PALETTE = {
   dirt: '#7a6a52',
   water: 0x2e8fa3,
   waterHi: 0x7fd4d9,
-  // vegetation
+  // vegetation (v3: ONE natural tree family — trunk + layered canopy)
   palmTrunk: 0x8a6a4a,
   palmLeaf: 0x3f9e4d,
   leafyLeaf: 0x4c9440,
+  treeTrunk: 0x6a4a30,
+  treeCanopy: 0x3f7a34,
+  treeCanopyDark: 0x356b2c,
+  treeCanopyLight: 0x4f9140,
+  // street furniture (v3)
+  lampMetal: 0x2a2e33,
+  lampGlow: 0xffc37a,
+  signRed: 0xc0272d,
+  signalRed: 0xff2a1a,
+  signalAmber: 0xffb020,
+  signalGreen: 0x2aff5a,
+  benchWood: 0x8a5a34,
+  benchIron: 0x23262b,
   // buildings: pastel art-deco walls (Miami / Vice City read)
   wallPastels: ['#f3e2c7', '#eec39a', '#dfe9ec', '#f2c4ce', '#cfe3ee', '#f7ead9'],
   windowDark: '#2c3e50',
@@ -55,10 +69,16 @@ export const SCALE = {
   carH: 1.35,
   wheelR: 0.34,
   palmH: 8.5,
-  treeH: 5.5,
+  treeH: 8.1,          // v3 🌲 tree: 2.6 m trunk + 3 layered cones
+  treeCanopyR: 2.3,    // widest canopy cone radius (Ø ~4.6 m)
   laneW: 3.4,
   sidewalkW: 2.6,
-  lampH: 5.2,
+  lampH: 5.4,
+  lampSpacing: 28,     // Jaka: lamp posts WIDE apart, never clustered
+  benchL: 1.8,
+  benchSeatH: 0.45,
+  signH: 2.6,          // stop-sign pole height
+  signalH: 4.6,        // traffic-light pole height
 };
 
 export const CFG = {

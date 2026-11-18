@@ -1,5 +1,7 @@
-// PALMBAY HEAT — audio.js: WebAudio synth. No audio assets.
+// PALMBAY HEAT — audio.js (v3): WebAudio synth. No audio assets.
 // Engine hum, siren, pickup chime, gunshot, punch, ambient pad.
+// v3 audit: blip/noise now honour the mute flag directly, so notes
+// scheduled via setTimeout in play() can't sound after muting.
 export class AudioSys {
   constructor() {
     this.ctx = null;
@@ -73,7 +75,7 @@ export class AudioSys {
     }
   }
   blip(freq, dur, type = 'sine', vol = 0.2) {
-    if (!this.ctx) return;
+    if (!this.ctx || this.muted) return;
     const t = this.ctx.currentTime;
     const o = this.ctx.createOscillator();
     const g = this.ctx.createGain();
@@ -84,7 +86,7 @@ export class AudioSys {
     o.start(t); o.stop(t + dur);
   }
   noise(dur, vol = 0.3, freq = 1200) {
-    if (!this.ctx) return;
+    if (!this.ctx || this.muted) return;
     const t = this.ctx.currentTime;
     const len = Math.floor(this.ctx.sampleRate * dur);
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);

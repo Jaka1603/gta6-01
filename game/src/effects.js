@@ -1,7 +1,9 @@
-// PALMBAY HEAT — effects.js (v2): pooled visual effects. Everything is
+// PALMBAY HEAT — effects.js (v3): pooled visual effects. Everything is
 // allocated once at load and reused — no `new` inside the frame loop.
 // Glow sprites (headlights, lamps, muzzle flash), impact sparks (one
 // THREE.Points pool), smoke / exhaust puffs (sprite pool).
+// v3 audit: Smoke.puff's scale argument was silently discarded by
+// update() — the starting scale is now kept per slot.
 const THREE = window.THREE;
 import { glowTexture } from './textures.js';
 
@@ -143,7 +145,7 @@ export class Smoke {
       const s = new THREE.Sprite(m);
       s.visible = false;
       scene.add(s);
-      this.pool.push({ s, life: 0, max: 0.8 });
+      this.pool.push({ s, life: 0, max: 0.8, scale0: 0.3 });
     }
     this.cursor = 0;
   }
@@ -153,6 +155,7 @@ export class Smoke {
     slot.s.position.copy(p);
     slot.s.material.color.setHex(color);
     slot.s.scale.setScalar(scale);
+    slot.scale0 = scale;
     slot.s.visible = true;
     slot.life = slot.max;
   }
@@ -167,7 +170,7 @@ export class Smoke {
       }
       const k = 1 - slot.life / slot.max;
       slot.s.position.y += dt * 0.6;
-      slot.s.scale.setScalar(0.3 + k * 0.5);
+      slot.s.scale.setScalar(slot.scale0 + k * 0.5);
       slot.s.material.opacity = 0.28 * (1 - k);
     }
   }
