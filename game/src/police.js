@@ -1,11 +1,14 @@
-// PALMBAY HEAT — police.js (v2): wanted system (0-5 stars), LSPD
+// PALMBAY HEAT — police.js (v3): wanted system (0-5 stars), LSPD
 // black/white police cars with flashing red/blue light bars, and one
 // uniformed officer standing by each car. Bust meter fills when a cop
-// is touching a slow player.
+// is touching a slow player. v3 audit: pursuit cars spawn snapped
+// onto the nearest road — the old 60 m ring around the player could
+// drop a car inside a building.
 const THREE = window.THREE;
 import { CFG, clamp } from './config.js';
 import { makeCar } from './vehicles.js';
 import { makeOfficer } from './gang.js';
+import { nearestRoadCoord } from './world.js';
 
 export class Police {
   constructor(scene, rand) {
@@ -59,10 +62,18 @@ export class Police {
     car.userData.maxSpeed = 30 + this.wanted * 1.5;
     car.userData.speed = 0;
     car.userData.police = true;
-    // spawn on a road near the player (set by main via this.playerPos)
+    // spawn near the player (set by main via this.playerPos), snapped
+    // onto the nearest road line so the car never starts inside a
+    // building (v3 audit)
     const p = this.playerPos || { x: 0, z: 0 };
     const a = this.rand() * Math.PI * 2;
-    car.position.set(p.x + Math.cos(a) * 60, 0, p.z + Math.sin(a) * 60);
+    const sx = p.x + Math.cos(a) * 60;
+    const sz = p.z + Math.sin(a) * 60;
+    if (Math.abs(sx - nearestRoadCoord(sx)) < Math.abs(sz - nearestRoadCoord(sz))) {
+      car.position.set(nearestRoadCoord(sx) + 3.2, 0, sz);
+    } else {
+      car.position.set(sx, 0, nearestRoadCoord(sz) + 3.2);
+    }
     this.group.add(car);
     this.cars.push(car);
     // one officer heels the car (only the first two cars, for perf)

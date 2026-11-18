@@ -1,14 +1,21 @@
-// PALMBAY HEAT — world.js (v2): procedural coastal city, SA-grade.
+// PALMBAY HEAT — world.js (v3): procedural coastal city, SA-grade.
 // Every surface textured (asphalt, sidewalks, facades with lit windows,
-// sand, grass, water, planks); pastel art-deco buildings; palms via
-// InstancedMesh; power poles + sagging cables; billboards; arched bridge;
-// pier; port cranes. City layout is data — the minimap reads it too.
+// sand, grass, water, planks); pastel art-deco buildings; power poles +
+// sagging cables; billboards; arched bridge; pier; port cranes.
+// v3 (Jaka's fixes): ONE natural layered-canopy tree family (no palm
+// spikes), placement-validated against building AABBs (+1.5 m) and road
+// rects (zero trees on asphalt); wide-spaced instanced street lamps;
+// sidewalks SEGMENTED so they stop at junctions, with zebra crossings
+// on every leg of every junction; traffic lights at avenue junctions +
+// stop signs at minor ones; slatted benches on sidewalk edges. City
+// layout is data — the minimap and the play-test assertions read it.
 const THREE = window.THREE;
 import { CFG, PALETTE, SCALE, ZONE_COLORS, zoneAt, rng, TAU } from './config.js';
 import {
   canvasTexture, asphaltTexture, laneTexture, sidewalkTexture,
   facadeTextures, sandTexture, groundTexture, waterTexture,
   plankTexture, glowTexture, billboardTexture,
+  zebraTexture, stopSignTexture,
 } from './textures.js';
 
 const PITCH = CFG.block + CFG.roadW; // 60
@@ -21,7 +28,67 @@ export const worldInfo = {
   roadY: 0.02,
   blocks: [],          // {x0,z0,x1,z1,zone} — minimap reads this
   gangTurf: null,      // world rect of the gang territory
+  // v3 placement data — the play-test asserts against these
+  buildingRects: [],   // {x0,z0,x1,z1} real building footprints
+  roadRects: [],       // {x0,z0,x1,z1} drivable asphalt rects
+  sidewalkSegs: [],    // {x0,z0,x1,z1} sidewalk segments + corner pads
+  zebraLegs: 0,        // zebra crossing legs painted (4 per junction)
+  trees: [],           // {x,z} validated tree trunk points
+  lamps: [],           // {x,z} street lamp bases
+  signs: [],           // {x,z,kind} traffic lights + stop signs
+  benches: [],         // {x,z} bench centres
 };
+
+// --- v3 geometry helpers: merge many small geoms into ONE draw call ---
+function mergeGeoms(list) {
+  let total = 0;
+  const parts = list.map((g) => {
+    const n = g.index ? g.toNonIndexed() : g;
+    total += n.attributes.position.count;
+    return n;
+  });
+  const pos = new Float32Array(total * 3);
+  const nor = new Float32Array(total * 3);
+  const uv = new Float32Array(total * 2);
+  let o3 = 0, o2 = 0;
+  for (const g of parts) {
+    pos.set(g.attributes.position.array, o3);
+    nor.set(g.attributes.normal.array, o3);
+    if (g.attributes.uv) uv.set(g.attributes.uv.array, o2);
+    o3 += g.attributes.position.count * 3;
+    o2 += g.attributes.position.count * 2;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return out;
+}
+const _m4 = new THREE.Matrix4();
+const _q4 = new THREE.Quaternion();
+const _e4 = new THREE.Euler();
+function xform(geo, x, y, z, ry = 0, sx = 1, sy = 1, sz = 1, rx = 0, rz = 0) {
+  const g = geo.clone();
+  _e4.set(rx, ry, rz);
+  _q4.setFromEuler(_e4);
+  _m4.compose(new THREE.Vector3(x, y, z), _q4, new THREE.Vector3(sx, sy, sz));
+  g.applyMatrix4(_m4);
+  return g;
+}
+function uvScale(geo, su, sv) {
+  const uv = geo.attributes.uv;
+  if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * su, uv.getY(i) * sv);
+  return geo;
+}
+// distance from a point to an AABB (0 when inside) — placement validation
+function rectDist(x, z, r) {
+  const dx = Math.max(r.x0 - x, 0, x - r.x1);
+  const dz = Math.max(r.z0 - z, 0, z - r.z1);
+  return Math.hypot(dx, dz);
+}
+function pointInRect(x, z, r, pad = 0) {
+  return x > r.x0 - pad && x < r.x1 + pad && z > r.z0 - pad && z < r.z1 + pad;
+}
 
 function mat(color, opts = {}) {
   return new THREE.MeshLambertMaterial({ color, ...opts });
@@ -122,7 +189,9 @@ export function buildWorld(scene, rand) {
     transparent: true, opacity: 0.94,
   }));
   sea.rotation.x = -Math.PI / 2;
-  sea.position.set(-HALF - 205, 0.4, 0);
+  // v3 audit: reach 5 m over the sand so the shoreline reads as wash,
+  // not a dirt gap between the old sea edge (-255) and the sand (-250)
+  sea.position.set(-HALF - 195, 0.15, 0);
   sea.userData.waves = true;
   sea.userData.base = seaGeo.attributes.position.array.slice();
   sea.userData.waterTex = waterTex;
@@ -170,60 +239,116 @@ export function buildWorld(scene, rand) {
         strip.rotation.z = Math.PI / 2;
       }
       group.add(strip);
-      // sidewalks: textured slabs on both edges of the road
-      for (const side of [-1, 1]) {
-        const st = sidewalkTex.clone();
-        st.needsUpdate = true;
-        st.repeat.set(1, roadLen / 4);
-        const sw = new THREE.Mesh(
-          new THREE.PlaneGeometry(SCALE.sidewalkW, roadLen),
-          new THREE.MeshStandardMaterial({ map: st, roughness: 0.95 })
-        );
-        sw.rotation.x = -Math.PI / 2;
-        if (horizontal) {
-          sw.position.set(0, 0.06, p + side * (w / 2 + SCALE.sidewalkW / 2));
-          sw.rotation.z = Math.PI / 2;
-        } else {
-          sw.position.set(p + side * (w / 2 + SCALE.sidewalkW / 2), 0.06, 0);
-        }
-        sw.receiveShadow = true;
-        group.add(sw);
-      }
-    }
-    // crosswalks on avenue intersections
-    if (i % CFG.avenueEvery === 0) {
-      for (let j = 0; j <= CFG.gridN; j += CFG.avenueEvery) {
-        const q = -HALF + j * PITCH;
-        const cwTex = canvasTexture(128, 64, (ctx, cw, ch) => {
-          ctx.fillStyle = 'rgba(0,0,0,0)';
-          ctx.clearRect(0, 0, cw, ch);
-          ctx.fillStyle = 'rgba(245,245,235,0.92)';
-          for (let x = 6; x < cw; x += 20) ctx.fillRect(x, 6, 10, ch - 12);
-        });
-        const cw = new THREE.Mesh(
-          new THREE.PlaneGeometry(13, 5),
-          new THREE.MeshBasicMaterial({
-            map: cwTex, transparent: true, depthWrite: false,
-            polygonOffset: true, polygonOffsetFactor: -2,
-          })
-        );
-        cw.rotation.x = -Math.PI / 2;
-        cw.position.set(p, CFG.roadY + 0.03, q + 8);
-        group.add(cw);
-        const cw2 = cw.clone();
-        cw2.rotation.z = Math.PI / 2;
-        cw2.position.set(p + 8, CFG.roadY + 0.03, q);
-        group.add(cw2);
-      }
+      // v3: register the drivable asphalt rect (placement validation)
+      worldInfo.roadRects.push(horizontal
+        ? { x0: -roadLen / 2, z0: p - w / 2, x1: roadLen / 2, z1: p + w / 2 }
+        : { x0: p - w / 2, z0: -roadLen / 2, x1: p + w / 2, z1: roadLen / 2 });
     }
   }
 
-  // -- city blocks: buildings + palms + lamps --
+  // -- v3 sidewalks (Jaka fix #5): SEGMENTED slabs that STOP at every
+  //    junction — a sidewalk never paints across asphalt — with corner
+  //    pads wrapping each junction. All merged into ONE draw call.
+  {
+    const segs = [];
+    const flat = new THREE.PlaneGeometry(1, 1);
+    flat.rotateX(-Math.PI / 2);
+    const addRun = (vertical, stripCenter) => {
+      let cur = -roadLen / 2;
+      const emit = (a, b) => {
+        if (b - a < 1.4) return;
+        const len = b - a, mid = (a + b) / 2;
+        const wX = vertical ? SCALE.sidewalkW : len;
+        const wZ = vertical ? len : SCALE.sidewalkW;
+        segs.push(uvScale(
+          xform(flat, vertical ? stripCenter : mid, 0.06, vertical ? mid : stripCenter, 0, wX, 1, wZ),
+          wX / 2.6, wZ / 2.6
+        ));
+        worldInfo.sidewalkSegs.push(vertical
+          ? { x0: stripCenter - SCALE.sidewalkW / 2, z0: a, x1: stripCenter + SCALE.sidewalkW / 2, z1: b }
+          : { x0: a, z0: stripCenter - SCALE.sidewalkW / 2, x1: b, z1: stripCenter + SCALE.sidewalkW / 2 });
+      };
+      for (let j = 0; j <= CFG.gridN; j++) {
+        const q = roadCoord(j);
+        const hq = roadHalfAt(q);
+        emit(cur, Math.min(q - hq - 0.4, roadLen / 2));
+        cur = Math.max(cur, q + hq + 0.4);
+      }
+      emit(cur, roadLen / 2);
+    };
+    for (let i = 0; i <= CFG.gridN; i++) {
+      const p = roadCoord(i);
+      const hw = roadHalfAt(p);
+      for (const side of [-1, 1]) {
+        addRun(true, p + side * (hw + SCALE.sidewalkW / 2));
+        addRun(false, p + side * (hw + SCALE.sidewalkW / 2));
+      }
+      // corner pads at every junction of road i
+      for (let j = 0; j <= CFG.gridN; j++) {
+        const q = roadCoord(j);
+        const hq = roadHalfAt(q);
+        for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+          const cxp = p + sx * (hw + SCALE.sidewalkW / 2);
+          const czp = q + sz * (hq + SCALE.sidewalkW / 2);
+          segs.push(uvScale(
+            xform(flat, cxp, 0.06, czp, 0, SCALE.sidewalkW, 1, SCALE.sidewalkW), 1, 1
+          ));
+          worldInfo.sidewalkSegs.push({
+            x0: cxp - SCALE.sidewalkW / 2, z0: czp - SCALE.sidewalkW / 2,
+            x1: cxp + SCALE.sidewalkW / 2, z1: czp + SCALE.sidewalkW / 2,
+          });
+        }
+      }
+    }
+    const swMesh = new THREE.Mesh(
+      mergeGeoms(segs),
+      new THREE.MeshStandardMaterial({ map: sidewalkTex, roughness: 0.95 })
+    );
+    swMesh.receiveShadow = true;
+    group.add(swMesh);
+  }
+
+  // -- v3 zebra crossings (Jaka fix #5): white stripes across EVERY leg
+  //    of EVERY junction, on the asphalt, aligned with the sidewalk
+  //    ends. One merged draw call.
+  {
+    const zTex = zebraTexture();
+    const legs = [];
+    const flat = new THREE.PlaneGeometry(1, 1);
+    flat.rotateX(-Math.PI / 2);
+    for (let i = 0; i <= CFG.gridN; i++) {
+      for (let j = 0; j <= CFG.gridN; j++) {
+        const p = roadCoord(i), q = roadCoord(j);
+        const hw = roadHalfAt(p), hq = roadHalfAt(q);
+        for (const s of [-1, 1]) {
+          // leg crossing road i (vertical): stripes parallel to traffic
+          legs.push(uvScale(
+            xform(flat, p, CFG.roadY + 0.025, q + s * (hq + 1.7), 0, hw * 2 - 0.6, 1, 3.0),
+            (hw * 2 - 0.6) / 4.2, 1
+          ));
+          // leg crossing road j (horizontal)
+          legs.push(uvScale(
+            xform(flat, p + s * (hw + 1.7), CFG.roadY + 0.025, q, Math.PI / 2, hq * 2 - 0.6, 1, 3.0),
+            (hq * 2 - 0.6) / 4.2, 1
+          ));
+          worldInfo.zebraLegs += 2;
+        }
+      }
+    }
+    const zm = new THREE.Mesh(mergeGeoms(legs), new THREE.MeshStandardMaterial({
+      map: zTex, transparent: true, roughness: 0.9, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -2,
+    }));
+    zm.receiveShadow = true;
+    group.add(zm);
+  }
+
+  // -- city blocks: buildings (vegetation + furniture come later,
+  //    placed against the finished layout data) --
   const buildings = [];
   const signs = [];
   const blockBuildings = {};   // "bx,bz" -> [ {x,z,w,d,h} ] for sign mounting
-  const palmSpots = [];
-  const treeSpots = [];
+  const treeSpots = [];        // filled by the validated v3 tree pass
   const awningColors = [0x2a9d8f, 0xe76f51, 0xf1c40f, 0x8e44ad, 0x2980b9];
   for (let bx = 0; bx < CFG.gridN; bx++) {
     for (let bz = 0; bz < CFG.gridN; bz++) {
@@ -257,6 +382,10 @@ export function buildWorld(scene, rand) {
         b.receiveShadow = true;
         group.add(b);
         buildings.push(b);
+        worldInfo.buildingRects.push({
+          x0: cx + ox - w / 2, z0: cz + oz - d / 2,
+          x1: cx + ox + w / 2, z1: cz + oz + d / 2,
+        });
         blockBuildings[bx + ',' + bz].push({ x: cx + ox, z: cz + oz, w, d, h });
         // roof cap + AC / water-tank props
         const cap = box(w + 0.3, 0.3, d + 0.3, PALETTE.roofDark,
@@ -298,126 +427,119 @@ export function buildWorld(scene, rand) {
           }
         }
       }
-      // palms on beachfront + suburbs, leafy trees downtown/suburb
-      if (zone === 'beach' || zone === 'suburb') {
-        const nP = 2 + Math.floor(rand() * 3);
-        for (let p = 0; p < nP; p++) {
-          palmSpots.push({
-            x: cx + (rand() - 0.5) * (CFG.block - 6),
-            z: cz + (rand() - 0.5) * (CFG.block - 6),
-            lean: (rand() - 0.5) * 0.22,
-            rot: rand() * TAU,
-            s: 0.85 + rand() * 0.35,
-          });
-        }
-      }
-      if (zone === 'downtown' || zone === 'suburb') {
-        const nT = 1 + Math.floor(rand() * 2);
-        for (let p = 0; p < nT; p++) {
-          treeSpots.push({
-            x: cx + (rand() - 0.5) * (CFG.block - 8),
-            z: cz + (rand() - 0.5) * (CFG.block - 8),
-            s: 0.8 + rand() * 0.5,
-          });
-        }
-      }
-      // street lamps at block corners
-      if ((bx + bz) % 2 === 0) {
-        const lx = cx - CFG.block / 2 - 2, lz = cz - CFG.block / 2 - 2;
-        group.add(makeLamp(lx, lz, glowTex));
-      }
+      // v3: trees are placed AFTER the whole city exists, in the
+      // validated vegetation pass below — the old per-block scatter is
+      // what put trees inside buildings and on roads (Jaka fixes #3/#4).
     }
   }
 
-  // -- beachfront avenue palm rows (the cover shot's leading line) --
-  for (let z = -HALF + 10; z < HALF - 6; z += 18) {
-    palmSpots.push({
-      x: -HALF + CFG.roadW + 3.2, z, lean: (rand() - 0.5) * 0.18,
-      rot: rand() * TAU, s: 0.95 + rand() * 0.25,
-    });
-    if (rand() < 0.7) {
-      palmSpots.push({
-        x: -HALF - 3.2, z: z + 9, lean: (rand() - 0.5) * 0.18,
-        rot: rand() * TAU, s: 0.9 + rand() * 0.3,
-      });
+  // -- v3 TREES (Jaka fixes #1/#3/#4): ONE natural tree family — a
+  //    tapered trunk with branches and a fuller, layered canopy of 3
+  //    stacked rounded cones (soft silhouette, NO palm frond spikes).
+  //    Placement is validated against the finished layout: a trunk
+  //    point must clear every building AABB by >= 1.5 m and must not
+  //    stand on any road rect — trees live on sand, grass verges,
+  //    sidewalk inner edges and park interiors only.
+  const treeClear = (x, z) => {
+    for (const r of worldInfo.roadRects) if (pointInRect(x, z, r, 0.35)) return false;
+    for (const r of worldInfo.buildingRects) if (rectDist(x, z, r) < 1.5) return false;
+    for (const t of treeSpots) {
+      const dx = t.x - x, dz = t.z - z;
+      if (dx * dx + dz * dz < 3.4 * 3.4) return false;
+    }
+    return true;
+  };
+  const addTree = (x, z, s) => {
+    if (treeClear(x, z)) treeSpots.push({ x, z, s, rot: rand() * TAU });
+  };
+  // beach sand row (west of the promenade fence, on the sand)
+  for (let z = -196; z <= 196; z += 12.5) {
+    if (z > 38 && z < 82) continue;   // keep the pier approach clear
+    addTree(-226.5 + (rand() - 0.5) * 2, z + (rand() - 0.5) * 5, 0.95 + rand() * 0.3);
+  }
+  // grass verge row east of the beachfront avenue (the cover's line)
+  for (let z = -198; z <= 198; z += 11) {
+    addTree(-192.8 + (rand() - 0.5) * 1.6, z + (rand() - 0.5) * 4, 0.9 + rand() * 0.35);
+  }
+  // sidewalk trees on the strip's inner edge, at block middles
+  for (let i = 1; i <= CFG.gridN; i++) {
+    const p = roadCoord(i);
+    const hw = roadHalfAt(p);
+    for (let b = 0; b < CFG.gridN; b++) {
+      const mid = -HALF + CFG.roadW / 2 + b * PITCH + CFG.block / 2;
+      for (const side of [-1, 1]) {
+        if (rand() < 0.5) addTree(p + side * (hw + 2.15), mid + (rand() - 0.5) * 10, 0.85 + rand() * 0.35);
+        if (rand() < 0.5) addTree(mid + (rand() - 0.5) * 10, p + side * (hw + 2.15), 0.85 + rand() * 0.35);
+      }
     }
   }
+  // park interiors in suburb + beach blocks, rejection-sampled
+  for (let bx = 0; bx < CFG.gridN; bx++) {
+    for (let bz = 0; bz < CFG.gridN; bz++) {
+      const zone = zoneAt(bx, bz);
+      if (zone !== 'suburb' && zone !== 'beach') continue;
+      const cx = -HALF + CFG.roadW / 2 + bx * PITCH + CFG.block / 2;
+      const cz = -HALF + CFG.roadW / 2 + bz * PITCH + CFG.block / 2;
+      const n = 2 + Math.floor(rand() * 3);
+      for (let k = 0; k < n; k++) {
+        for (let tries = 0; tries < 8; tries++) {
+          const x = cx + (rand() - 0.5) * (CFG.block - 7);
+          const z = cz + (rand() - 0.5) * (CFG.block - 7);
+          if (treeClear(x, z)) {
+            treeSpots.push({ x, z, s: 0.9 + rand() * 0.4, rot: rand() * TAU });
+            break;
+          }
+        }
+      }
+    }
+  }
+  worldInfo.trees = treeSpots.map((t) => ({ x: t.x, z: t.z }));
 
-  // -- palms: instanced trunks + instanced fronds (2 draw calls total) --
+  // -- trees rendered as 2 instanced meshes (trunks + canopies) --
   {
     const dummy = new THREE.Object3D();
-    const trunkGeo = new THREE.CylinderGeometry(0.14, 0.24, SCALE.palmH, 6);
-    trunkGeo.translate(0, SCALE.palmH / 2, 0);
+    const trunkParts = [];
+    const tg = new THREE.CylinderGeometry(0.13, 0.21, 2.6, 7);
+    tg.translate(0, 1.3, 0);
+    trunkParts.push(tg);
+    for (const s of [-1, 1]) {
+      const br = new THREE.CylinderGeometry(0.05, 0.08, 1.1, 5);
+      br.translate(0, 0.55, 0);
+      trunkParts.push(xform(br, s * 0.28, 2.2, 0, 0, 1, 1, 1, 0, s * 0.7));
+    }
+    const trunkGeo = mergeGeoms(trunkParts);
     const trunkMat = new THREE.MeshStandardMaterial({
-      color: PALETTE.palmTrunk, roughness: 1,
+      color: PALETTE.treeTrunk, roughness: 1,
     });
-    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, palmSpots.length);
-    const frondGeo = new THREE.ConeGeometry(0.75, 4.4, 4);
-    frondGeo.translate(0, 2.2, 0);
-    frondGeo.scale(1, 1, 0.28);   // flattened palm frond
-    const frondMat = new THREE.MeshStandardMaterial({
-      color: PALETTE.palmLeaf, roughness: 0.9, side: THREE.DoubleSide,
-    });
-    const fronds = new THREE.InstancedMesh(
-      frondGeo, frondMat, palmSpots.length * 8
-    );
-    palmSpots.forEach((p, i) => {
-      dummy.position.set(p.x, 0, p.z);
-      dummy.rotation.set(0, p.rot, p.lean);
-      dummy.scale.setScalar(p.s);
-      dummy.updateMatrix();
-      trunks.setMatrixAt(i, dummy.matrix);
-      for (let f = 0; f < 8; f++) {
-        const a = (f / 8) * TAU + p.rot;
-        dummy.position.set(
-          p.x + Math.cos(a) * 1.1 * p.s,
-          SCALE.palmH * p.s - 0.4,
-          p.z + Math.sin(a) * 1.1 * p.s
-        );
-        // droop outward-down from the crown
-        dummy.rotation.set(
-          Math.sin(a) * 1.15, 0, -Math.cos(a) * 1.15
-        );
-        dummy.scale.setScalar(p.s);
-        dummy.updateMatrix();
-        fronds.setMatrixAt(i * 8 + f, dummy.matrix);
+    // canopy: 3 stacked rounded cones; vertices jittered so the
+    // silhouette stays soft and organic instead of spiky
+    const coneAt = (r, h, y) => {
+      const c = new THREE.ConeGeometry(r, h, 9);
+      const pa = c.attributes.position;
+      for (let vi = 0; vi < pa.count; vi++) {
+        pa.setX(vi, pa.getX(vi) + (rand() - 0.5) * 0.22);
+        pa.setZ(vi, pa.getZ(vi) + (rand() - 0.5) * 0.22);
       }
+      c.translate(0, y, 0);
+      return c;
+    };
+    const canopyGeo = mergeGeoms([
+      coneAt(SCALE.treeCanopyR, 3.6, 2.6 + 1.6),
+      coneAt(SCALE.treeCanopyR * 0.74, 3.0, 2.6 + 3.0),
+      coneAt(SCALE.treeCanopyR * 0.48, 2.5, 2.6 + 4.3),
+    ]);
+    const canopyMat = new THREE.MeshStandardMaterial({
+      color: PALETTE.treeCanopy, roughness: 0.95, flatShading: true,
     });
-    trunks.castShadow = true;
-    fronds.castShadow = true;
-    trunks.instanceMatrix.needsUpdate = true;
-    fronds.instanceMatrix.needsUpdate = true;
-    trunks.frustumCulled = false;
-    fronds.frustumCulled = false;
-    group.add(trunks, fronds);
-  }
-
-  // -- leafy trees: instanced trunks + instanced canopies --
-  {
-    const dummy = new THREE.Object3D();
-    const tGeo = new THREE.CylinderGeometry(0.16, 0.24, 3.2, 6);
-    tGeo.translate(0, 1.6, 0);
-    const tMat = new THREE.MeshStandardMaterial({ color: 0x6a4a30, roughness: 1 });
-    const trunks = new THREE.InstancedMesh(tGeo, tMat, treeSpots.length);
-    const cGeo = new THREE.IcosahedronGeometry(2.2, 0);
-    const cMat = new THREE.MeshStandardMaterial({
-      color: PALETTE.leafyLeaf, roughness: 1, flatShading: true,
-    });
-    const canopies = new THREE.InstancedMesh(cGeo, cMat, treeSpots.length * 2);
-    treeSpots.forEach((p, i) => {
-      dummy.position.set(p.x, 0, p.z);
-      dummy.rotation.set(0, 0, 0);
-      dummy.scale.setScalar(p.s);
+    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treeSpots.length);
+    const canopies = new THREE.InstancedMesh(canopyGeo, canopyMat, treeSpots.length);
+    treeSpots.forEach((t, i) => {
+      dummy.position.set(t.x, 0, t.z);
+      dummy.rotation.set(0, t.rot, 0);
+      dummy.scale.setScalar(t.s);
       dummy.updateMatrix();
       trunks.setMatrixAt(i, dummy.matrix);
-      dummy.position.set(p.x, 4.4 * p.s, p.z);
-      dummy.scale.set(p.s, p.s * 0.75, p.s);
-      dummy.updateMatrix();
-      canopies.setMatrixAt(i * 2, dummy.matrix);
-      dummy.position.set(p.x + 1.4 * p.s, 3.6 * p.s, p.z + 0.8 * p.s);
-      dummy.scale.setScalar(p.s * 0.7);
-      dummy.updateMatrix();
-      canopies.setMatrixAt(i * 2 + 1, dummy.matrix);
+      canopies.setMatrixAt(i, dummy.matrix);
     });
     trunks.castShadow = true;
     canopies.castShadow = true;
@@ -426,6 +548,324 @@ export function buildWorld(scene, rand) {
     trunks.frustumCulled = false;
     canopies.frustumCulled = false;
     group.add(trunks, canopies);
+  }
+
+  // -- v3 STREET LAMPS (Jaka fix #2): instanced posts every ~28 m,
+  //    alternating sides of the street, warm emissive heads and a
+  //    single Points glow layer — never clustered, never on asphalt.
+  const lampSpots = [];
+  {
+    const lampClear = (x, z) => {
+      for (const r of worldInfo.roadRects) if (pointInRect(x, z, r, 0.3)) return false;
+      for (const r of worldInfo.buildingRects) if (rectDist(x, z, r) < 1.2) return false;
+      for (const t of treeSpots) {
+        const dx = t.x - x, dz = t.z - z;
+        if (dx * dx + dz * dz < 2.2 * 2.2) return false;
+      }
+      return true;
+    };
+    for (let i = 0; i <= CFG.gridN; i++) {
+      const p = roadCoord(i);
+      const hw = roadHalfAt(p);
+      let k = 0;
+      for (let a = -196; a <= 196; a += SCALE.lampSpacing, k++) {
+        const side = (k % 2 === 0) ? 1 : -1;
+        const along = a + (i % 2) * 9;
+        let inJunction = false;
+        for (let j = 0; j <= CFG.gridN; j++) {
+          const q = roadCoord(j);
+          if (Math.abs(along - q) < roadHalfAt(q) + 2.6) { inJunction = true; break; }
+        }
+        if (inJunction) continue;
+        if (lampClear(p + side * (hw + 0.55), along)) {
+          lampSpots.push({ x: p + side * (hw + 0.55), z: along, dirX: -side, dirZ: 0 });
+        }
+        if (lampClear(along, p + side * (hw + 0.55))) {
+          lampSpots.push({ x: along, z: p + side * (hw + 0.55), dirX: 0, dirZ: -side });
+        }
+      }
+    }
+    worldInfo.lamps = lampSpots.map((l) => ({ x: l.x, z: l.z }));
+    const poleParts = [];
+    const pg = new THREE.CylinderGeometry(0.06, 0.09, SCALE.lampH, 7);
+    pg.translate(0, SCALE.lampH / 2, 0);
+    poleParts.push(pg);
+    const ag = new THREE.BoxGeometry(0.09, 0.09, 1.15);
+    ag.translate(0, SCALE.lampH - 0.05, 0.5);
+    poleParts.push(ag);
+    const hg = new THREE.BoxGeometry(0.24, 0.09, 0.52);
+    hg.translate(0, SCALE.lampH - 0.12, 1.0);
+    poleParts.push(hg);
+    const poleGeo = mergeGeoms(poleParts);
+    const poleMat = new THREE.MeshStandardMaterial({
+      color: PALETTE.lampMetal, roughness: 0.55, metalness: 0.45,
+    });
+    const poles = new THREE.InstancedMesh(poleGeo, poleMat, lampSpots.length);
+    const bulbGeo = new THREE.BoxGeometry(0.16, 0.05, 0.4);
+    bulbGeo.translate(0, SCALE.lampH - 0.18, 1.0);
+    const bulbMat = new THREE.MeshStandardMaterial({
+      color: 0xffe2b0, emissive: PALETTE.lampGlow, emissiveIntensity: 2.6,
+    });
+    const bulbs = new THREE.InstancedMesh(bulbGeo, bulbMat, lampSpots.length);
+    const dummy = new THREE.Object3D();
+    const glowPos = new Float32Array(lampSpots.length * 3);
+    lampSpots.forEach((l, idx) => {
+      dummy.position.set(l.x, 0, l.z);
+      dummy.rotation.set(0, Math.atan2(l.dirX, l.dirZ), 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      poles.setMatrixAt(idx, dummy.matrix);
+      bulbs.setMatrixAt(idx, dummy.matrix);
+      glowPos[idx * 3] = l.x + l.dirX * 1.0;
+      glowPos[idx * 3 + 1] = SCALE.lampH - 0.2;
+      glowPos[idx * 3 + 2] = l.z + l.dirZ * 1.0;
+    });
+    poles.castShadow = true;
+    poles.instanceMatrix.needsUpdate = true;
+    bulbs.instanceMatrix.needsUpdate = true;
+    poles.frustumCulled = false;
+    bulbs.frustumCulled = false;
+    group.add(poles, bulbs);
+    const glowGeo = new THREE.BufferGeometry();
+    glowGeo.setAttribute('position', new THREE.BufferAttribute(glowPos, 3));
+    const glows = new THREE.Points(glowGeo, new THREE.PointsMaterial({
+      map: glowTex, color: PALETTE.lampGlow, size: 2.4, sizeAttenuation: true,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      transparent: true, opacity: 0.5,
+    }));
+    glows.frustumCulled = false;
+    group.add(glows);
+  }
+
+  // -- v3 TRAFFIC FURNITURE (Jaka fix #6): traffic lights where an
+  //    avenue meets any road, stop signs at minor junctions — bases
+  //    on sidewalk corners, validated like the trees and lamps.
+  const signSpots = [];
+  {
+    const furnClear = (x, z) => {
+      for (const r of worldInfo.roadRects) if (pointInRect(x, z, r, 0.3)) return false;
+      for (const r of worldInfo.buildingRects) if (rectDist(x, z, r) < 1.2) return false;
+      for (const t of treeSpots) {
+        const dx = t.x - x, dz = t.z - z;
+        if (dx * dx + dz * dz < 2.0 * 2.0) return false;
+      }
+      for (const l of lampSpots) {
+        const dx = l.x - x, dz = l.z - z;
+        if (dx * dx + dz * dz < 1.6 * 1.6) return false;
+      }
+      for (const s of signSpots) {
+        const dx = s.x - x, dz = s.z - z;
+        if (dx * dx + dz * dz < 1.6 * 1.6) return false;
+      }
+      return true;
+    };
+    for (let i = 0; i <= CFG.gridN; i++) {
+      for (let j = 0; j <= CFG.gridN; j++) {
+        const p = roadCoord(i), q = roadCoord(j);
+        const hw = roadHalfAt(p), hq = roadHalfAt(q);
+        const avenue = (i % CFG.avenueEvery === 0) || (j % CFG.avenueEvery === 0);
+        if (avenue) {
+          for (const [sx, sz] of [[1, 1], [-1, -1]]) {
+            const x = p + sx * (hw + 1.3), z = q + sz * (hq + 1.3);
+            if (furnClear(x, z)) {
+              signSpots.push({ x, z, kind: 'signal', yaw: Math.atan2(-sx, -sz) });
+            }
+          }
+        } else {
+          const x = p + hw + 1.3, z = q - hq - 1.3;
+          if (furnClear(x, z)) {
+            signSpots.push({ x, z, kind: 'stop', yaw: Math.atan2(-1, 1) });
+          }
+        }
+      }
+    }
+    worldInfo.signs = signSpots.map((s) => ({ x: s.x, z: s.z, kind: s.kind }));
+    const signals = signSpots.filter((s) => s.kind === 'signal');
+    const stops = signSpots.filter((s) => s.kind === 'stop');
+    const dummy = new THREE.Object3D();
+    const sigParts = [];
+    const sp = new THREE.CylinderGeometry(0.07, 0.1, SCALE.signalH, 7);
+    sp.translate(0, SCALE.signalH / 2, 0);
+    sigParts.push(sp);
+    const sa = new THREE.BoxGeometry(0.09, 0.09, 2.3);
+    sa.translate(0, SCALE.signalH - 0.1, 1.05);
+    sigParts.push(sa);
+    const sigGeo = mergeGeoms(sigParts);
+    const sigMat = new THREE.MeshStandardMaterial({
+      color: PALETTE.lampMetal, roughness: 0.55, metalness: 0.45,
+    });
+    const sigPoles = new THREE.InstancedMesh(sigGeo, sigMat, Math.max(1, signals.length));
+    const headGeo = new THREE.BoxGeometry(0.34, 0.92, 0.26);
+    headGeo.translate(0, SCALE.signalH - 0.62, 2.1);
+    const headMat = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.5 });
+    const heads = new THREE.InstancedMesh(headGeo, headMat, Math.max(1, signals.length));
+    const dotGeo = new THREE.CircleGeometry(0.085, 10);
+    dotGeo.translate(0, 0, 0.145);
+    const greenDots = [], redDots = [], darkDots = [];
+    signals.forEach((s, si) => {
+      dummy.position.set(s.x, 0, s.z);
+      dummy.rotation.set(0, s.yaw, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      sigPoles.setMatrixAt(si, dummy.matrix);
+      heads.setMatrixAt(si, dummy.matrix);
+      const fx = s.x + Math.sin(s.yaw) * 2.1;
+      const fz = s.z + Math.cos(s.yaw) * 2.1;
+      const litGreen = (si % 2 === 0);
+      const rows = [SCALE.signalH - 0.32, SCALE.signalH - 0.62, SCALE.signalH - 0.92];
+      rows.forEach((y, ri) => {
+        const entry = { x: fx, y, z: fz, yaw: s.yaw };
+        if (ri === 0) (litGreen ? darkDots : redDots).push(entry);
+        else if (ri === 2) (litGreen ? greenDots : darkDots).push(entry);
+        else darkDots.push(entry);
+      });
+    });
+    sigPoles.count = signals.length;
+    heads.count = signals.length;
+    sigPoles.castShadow = true;
+    sigPoles.instanceMatrix.needsUpdate = true;
+    heads.instanceMatrix.needsUpdate = true;
+    sigPoles.frustumCulled = false;
+    heads.frustumCulled = false;
+    group.add(sigPoles, heads);
+    const mkDots = (list, material) => {
+      const m = new THREE.InstancedMesh(dotGeo, material, Math.max(1, list.length));
+      list.forEach((d, idx) => {
+        dummy.position.set(d.x, d.y, d.z);
+        dummy.rotation.set(0, d.yaw, 0);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        m.setMatrixAt(idx, dummy.matrix);
+      });
+      m.count = list.length;
+      m.instanceMatrix.needsUpdate = true;
+      m.frustumCulled = false;
+      return m;
+    };
+    group.add(mkDots(greenDots, new THREE.MeshBasicMaterial({ color: PALETTE.signalGreen })));
+    group.add(mkDots(redDots, new THREE.MeshBasicMaterial({ color: PALETTE.signalRed })));
+    group.add(mkDots(darkDots, new THREE.MeshStandardMaterial({ color: 0x2c2f26, roughness: 0.6 })));
+    // stop signs: thin pole + octagon with a printed STOP face
+    const stopPoleGeo = new THREE.CylinderGeometry(0.05, 0.06, SCALE.signH, 6);
+    stopPoleGeo.translate(0, SCALE.signH / 2, 0);
+    const stopPoles = new THREE.InstancedMesh(stopPoleGeo, sigMat, Math.max(1, stops.length));
+    const octGeo = new THREE.CylinderGeometry(0.46, 0.46, 0.05, 8);
+    octGeo.rotateX(Math.PI / 2);
+    octGeo.rotateZ(Math.PI / 8);
+    octGeo.translate(0, SCALE.signH + 0.25, 0);
+    const stopMat = new THREE.MeshStandardMaterial({
+      map: stopSignTexture(), roughness: 0.5,
+    });
+    const octs = new THREE.InstancedMesh(octGeo, stopMat, Math.max(1, stops.length));
+    stops.forEach((s, si) => {
+      dummy.position.set(s.x, 0, s.z);
+      dummy.rotation.set(0, s.yaw, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      stopPoles.setMatrixAt(si, dummy.matrix);
+      octs.setMatrixAt(si, dummy.matrix);
+    });
+    stopPoles.count = stops.length;
+    octs.count = stops.length;
+    stopPoles.instanceMatrix.needsUpdate = true;
+    octs.instanceMatrix.needsUpdate = true;
+    stopPoles.frustumCulled = false;
+    octs.frustumCulled = false;
+    group.add(stopPoles, octs);
+  }
+
+  // -- v3 BENCHES (Jaka fix #7): slatted waiting benches along
+  //    sidewalk edges, the promenade and the pier — validated
+  //    placement, never on the road, never through other furniture.
+  const benchSpots = [];
+  {
+    const benchClear = (x, z) => {
+      for (const r of worldInfo.roadRects) if (pointInRect(x, z, r, 0.3)) return false;
+      for (const r of worldInfo.buildingRects) if (rectDist(x, z, r) < 1.0) return false;
+      for (const t of treeSpots) {
+        const dx = t.x - x, dz = t.z - z;
+        if (dx * dx + dz * dz < 2.4 * 2.4) return false;
+      }
+      for (const l of lampSpots) {
+        const dx = l.x - x, dz = l.z - z;
+        if (dx * dx + dz * dz < 1.8 * 1.8) return false;
+      }
+      for (const s of signSpots) {
+        const dx = s.x - x, dz = s.z - z;
+        if (dx * dx + dz * dz < 1.8 * 1.8) return false;
+      }
+      for (const b of benchSpots) {
+        const dx = b.x - x, dz = b.z - z;
+        if (dx * dx + dz * dz < 6 * 6) return false;
+      }
+      return true;
+    };
+    const addBench = (x, z, yaw, y = 0) => {
+      if (benchClear(x, z)) benchSpots.push({ x, z, yaw, y });
+    };
+    // promenade benches facing the sea + east-side benches facing it too
+    for (let z = -170; z <= 180; z += 35) addBench(-222.1, z, -Math.PI / 2);
+    for (let z = -150; z <= 170; z += 40) addBench(-197.8, z + 12, -Math.PI / 2);
+    // city sidewalks: inner strip edge at block middles, facing the road
+    for (let i = 1; i <= CFG.gridN; i += 2) {
+      const p = roadCoord(i);
+      const hw = roadHalfAt(p);
+      for (let b = 0; b < CFG.gridN; b += 2) {
+        const mid = -HALF + CFG.roadW / 2 + b * PITCH + CFG.block / 2;
+        addBench(p + hw + 2.28, mid, -Math.PI / 2);
+        addBench(mid, p - hw - 2.28, 0);
+      }
+    }
+    // pier benches facing the water (deck top is y = 1.5)
+    addBench(-262, 58.5, -Math.PI / 2, 1.5);
+    addBench(-276, 61.5, -Math.PI / 2, 1.5);
+    worldInfo.benches = benchSpots.map((b) => ({ x: b.x, z: b.z }));
+    const slatParts = [], legParts = [];
+    for (const dz of [-0.16, 0, 0.16]) {
+      const s = new THREE.BoxGeometry(SCALE.benchL, 0.045, 0.115);
+      s.translate(0, SCALE.benchSeatH, dz);
+      slatParts.push(s);
+    }
+    for (const dy of [0.66, 0.84]) {
+      const s = new THREE.BoxGeometry(SCALE.benchL, 0.11, 0.04);
+      s.translate(0, dy, -0.26);
+      slatParts.push(s);
+    }
+    for (const sx of [-0.78, 0.78]) {
+      const leg = new THREE.BoxGeometry(0.06, SCALE.benchSeatH, 0.52);
+      leg.translate(sx, SCALE.benchSeatH / 2, 0);
+      legParts.push(leg);
+      const post = new THREE.BoxGeometry(0.06, 0.5, 0.05);
+      post.translate(sx, SCALE.benchSeatH + 0.22, -0.26);
+      legParts.push(post);
+    }
+    const slats = new THREE.InstancedMesh(
+      mergeGeoms(slatParts),
+      new THREE.MeshStandardMaterial({ color: PALETTE.benchWood, roughness: 0.85 }),
+      Math.max(1, benchSpots.length)
+    );
+    const legs = new THREE.InstancedMesh(
+      mergeGeoms(legParts),
+      new THREE.MeshStandardMaterial({ color: PALETTE.benchIron, roughness: 0.6, metalness: 0.4 }),
+      Math.max(1, benchSpots.length)
+    );
+    const dummy = new THREE.Object3D();
+    benchSpots.forEach((b, idx) => {
+      dummy.position.set(b.x, b.y, b.z);
+      dummy.rotation.set(0, b.yaw, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      slats.setMatrixAt(idx, dummy.matrix);
+      legs.setMatrixAt(idx, dummy.matrix);
+    });
+    slats.count = benchSpots.length;
+    legs.count = benchSpots.length;
+    slats.castShadow = true;
+    slats.instanceMatrix.needsUpdate = true;
+    legs.instanceMatrix.needsUpdate = true;
+    slats.frustumCulled = false;
+    legs.frustumCulled = false;
+    group.add(slats, legs);
   }
 
   // -- power poles + sagging cables along the beachfront avenue --
@@ -566,7 +1006,24 @@ export function buildWorld(scene, rand) {
       posts.setMatrixAt(i * 2 + 1, dummy.matrix);
     }
     posts.instanceMatrix.needsUpdate = true;
+    posts.frustumCulled = false;
     group.add(posts);
+    // v3 audit: support posts under the deck (it floated 0.5 m over
+    // the sand/water with nothing holding it up)
+    const supGeo = new THREE.CylinderGeometry(0.22, 0.22, 1.6, 6);
+    const sups = new THREE.InstancedMesh(supGeo, postMat, 10);
+    let si = 0;
+    for (let i = 0; i < 5; i++) {
+      for (const zz of [57.2, 62.8]) {
+        dummy.position.set(-HALF - 34 - i * 13, 0.2, zz);
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        sups.setMatrixAt(si++, dummy.matrix);
+      }
+    }
+    sups.instanceMatrix.needsUpdate = true;
+    sups.frustumCulled = false;
+    group.add(sups);
   }
 
   // -- promenade fence between sidewalk and sand (beachfront) --
@@ -588,7 +1045,9 @@ export function buildWorld(scene, rand) {
       })
     );
     fenceTex.repeat.set(30, 1);
-    fence.position.set(-HALF - 8, 0.7, 0);
+    // v3 audit: x=-218 stood ON the avenue's west lane (avenue spans
+    // -220..-200) — the fence belongs on the sand side of the promenade
+    fence.position.set(-HALF - 12.9, 0.7, 0);
     fence.rotation.y = Math.PI / 2;
     group.add(fence);
   }
@@ -607,38 +1066,12 @@ export function buildWorld(scene, rand) {
   return { group, buildings, signs };
 }
 
-function makeLamp(x, z, glowTex) {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.14, 0.2, SCALE.lampH, 6), mat(0x333340)
-  );
-  pole.position.y = SCALE.lampH / 2;
-  pole.castShadow = true;
-  g.add(pole);
-  const arm = new THREE.Mesh(
-    new THREE.BoxGeometry(1.6, 0.12, 0.12), mat(0x333340)
-  );
-  arm.position.set(0.7, SCALE.lampH, 0);
-  g.add(arm);
-  const bulb = new THREE.Mesh(
-    new THREE.SphereGeometry(0.22, 8, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffd98a })
-  );
-  bulb.position.set(1.4, SCALE.lampH - 0.1, 0);
-  g.add(bulb);
-  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: glowTex, color: 0xffd98a, blending: THREE.AdditiveBlending,
-    depthWrite: false, transparent: true, opacity: 0.55,
-  }));
-  glow.scale.setScalar(2.2);
-  glow.position.copy(bulb.position);
-  g.add(glow);
-  g.position.set(x, 0, z);
-  return g;
-}
-
 // road coordinate helpers (shared by traffic / missions / staging)
 export function roadCoord(i) { return -HALF + i * PITCH; }
+export function roadHalfAt(coord) {
+  const i = Math.round((coord + HALF) / PITCH);
+  return (i % CFG.avenueEvery === 0) ? (CFG.roadW + 6) / 2 : CFG.roadW / 2;
+}
 export function nearestRoadCoord(v) {
   const i = Math.round((v + HALF) / PITCH);
   return roadCoord(Math.max(0, Math.min(CFG.gridN, i)));

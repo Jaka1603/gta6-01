@@ -20,6 +20,13 @@
 // v2 (2026-11-17): SA-grade visual polish — canvas textures on every
 // surface, sunset sky dome + horizon fog, LSPD livery, gang turf with
 // rifles, birds / gulls / dog / cat ambient life, staged screenshots.
+// v3 (2026-11-18): Jaka's review fixes — natural layered-canopy trees
+// (placement-validated: zero trees inside buildings, zero on roads),
+// wide-spaced street lamps, segmented sidewalks that stop at junctions
+// with zebra crossings on every leg, traffic lights + stop signs,
+// sidewalk benches, LEGO-minifigure citizens, and a full bug-audit
+// pass (building collision, mission-flow fixes, traffic/ped AI fixes,
+// minimap accuracy, occlusion-correct shooting).
 const ENTRY = {
   title: 'PALMBAY HEAT',
   competition: 'gta6-01',
@@ -28,7 +35,7 @@ const ENTRY = {
   hero: 'Dario Venn, wheelman for Mama Rosa',
   tech: 'three.js r152 (vendored), WebAudio synth, localStorage saves',
   screenshots: ['1-cover.jpg', '2-foot.jpg', '3-mission.jpg', '4-title.jpg'],
-  visual: 'v2 SA-grade: textured streets + facades, sunset grade, LSPD, gang, ambient life',
+  visual: 'v3: natural trees, lamps, zebra crossings, traffic lights, benches, LEGO citizens, full bug audit',
 };
 // Dossier blurb (what the judge reads first): a complete open-world loop —
 // steal a car, outrun the cops at 3 stars, run Mama Rosa's five jobs, and
@@ -40,11 +47,14 @@ const DOSSIER_BLURB =
   'fixer Mama Rosa: steal cars, outrun police at up to 5 wanted stars, ' +
   'fight on foot, and run five story missions — pickup, chase, timed ' +
   'delivery, 3-star escape, finale — across a procedural city with ' +
-  'traffic, pedestrians, a port, a beach and a live minimap. v2 polishes ' +
-  'the look to San Andreas class: every surface textured, warm sunset ' +
-  'grading with draw-distance haze, LSPD black/white cruisers, a green ' +
-  'gang turf with rifles, and birds, gulls, a dog and a cat that make ' +
-  'the city feel alive.';
+  'traffic, pedestrians, a port, a beach and a live minimap. v3 answers ' +
+  'the review: natural layered-canopy trees stand only where trees ' +
+  'belong (placement-validated — none inside buildings, none on the ' +
+  'road), street lamps march at wide intervals, sidewalks stop at ' +
+  'junctions and zebra crossings stripe every crossing, traffic lights ' +
+  'and stop signs work the corners, benches wait along the promenade, ' +
+  'and every citizen is a crisp LEGO-style minifigure — all after a ' +
+  'full bug-audit pass over missions, collisions, AI and the minimap.';
 console.log(`Entry: ${ENTRY.title} — ${ENTRY.genre} — ${ENTRY.city}`);
 console.log(`Visuals: ${ENTRY.visual}`);
 console.log(DOSSIER_BLURB);

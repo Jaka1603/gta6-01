@@ -1,7 +1,17 @@
-// PALMBAY HEAT — main.js (v2): state machine, camera, controls,
+// PALMBAY HEAT — main.js (v3): state machine, camera, controls,
 // save/load, shot staging, game loop. SA-grade look: gradient sky dome
 // with sun disc, horizon-matched fog, low warm sun with a shadow camera
 // that follows the player, ACES tone mapping, living ambient systems.
+// v3 audit fixes: real building collision for the player, the hero
+// car, police and the chase target (v2 had none — everything passed
+// through buildings); the HEAT ESCAPE mission now actually raises
+// 3 stars (it used to complete instantly for free); the bust meter
+// uses the player's real on-foot speed (it filled while sprinting
+// away); stolen parked cars are restored on exit and lend their own
+// top speed; start/continue resets police + in-car state; shooting
+// raycasts against the city too (no more hits through buildings);
+// traffic knows where the player is; the chase shot starts the chase
+// mission it depicts.
 const THREE = window.THREE;
 import { CFG, PALETTE, SCALE, rng, clamp, lerp, TAU } from './config.js';
 import { buildWorld, roadCoord, nearestRoadCoord, onRoad, worldInfo } from './world.js';
@@ -173,6 +183,9 @@ const state = {
   shotReady: false,
   exhaustT: 0,
   skidT: 0,
+  footSpeed: 0,       // v3: real on-foot speed for the bust meter
+  stolenCar: null,    // v3: the parked car currently swapped out
+  heroMax: 0,         // v3: hero top speed to restore after a steal
 };
 let saveData = loadSave();
 
@@ -192,6 +205,39 @@ function writeSave() {
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch {}
   saveData = data;
+}
+
+// ---------- building collision (v3) ----------
+// Circle-vs-AABB push-out against the real building footprints.
+// Returns how far the position was moved (0 = no contact).
+function collideBuildings(pos, radius) {
+  let moved = 0;
+  const rects = worldInfo.buildingRects;
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const nx = clamp(pos.x, r.x0, r.x1);
+    const nz = clamp(pos.z, r.z0, r.z1);
+    const dx = pos.x - nx, dz = pos.z - nz;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= radius * radius) continue;
+    if (d2 > 1e-6) {
+      const d = Math.sqrt(d2);
+      pos.x = nx + (dx / d) * radius;
+      pos.z = nz + (dz / d) * radius;
+      moved = Math.max(moved, radius - d);
+    } else {
+      // centre inside the footprint: exit along the smallest penetration
+      const pl = pos.x - r.x0, pr = r.x1 - pos.x;
+      const pt = pos.z - r.z0, pb = r.z1 - pos.z;
+      const m = Math.min(pl, pr, pt, pb);
+      if (m === pl) pos.x = r.x0 - radius;
+      else if (m === pr) pos.x = r.x1 + radius;
+      else if (m === pt) pos.z = r.z0 - radius;
+      else pos.z = r.z1 + radius;
+      moved = Math.max(moved, radius);
+    }
+  }
+  return moved;
 }
 
 // ---------- title screen ----------
@@ -223,6 +269,11 @@ function startGame(fromSave) {
   endEl.classList.add('hidden');
   pauseEl.classList.add('hidden');
   state.mode = 'playing';
+  // v3 audit: a (re)start always begins from a clean street — v2 kept
+  // the previous session's police cars and a stale in-car flag
+  police.clear();
+  state.inCar = false;
+  player.visible = true;
   if (fromSave && saveData) {
     state.cash = saveData.cash;
     state.missionsDone = saveData.missionsDone || 0;
@@ -266,6 +317,10 @@ missions.onEvent = (type, payload) => {
     hud.setZone(payload.zone || '');
     hud.phone('MAMA ROSA', payload.brief);
     audio.play('mission');
+    // v3 audit: HEAT ESCAPE's brief promises 3 stars, but nothing
+    // ever raised them — and the completion check (wanted 0, heat 0)
+    // was already true, so the mission completed instantly for free
+    if (payload.escape) police.setWanted(3);
   } else if (type === 'complete') {
     state.cash += payload.reward;
     state.missionsDone += 1;
@@ -283,7 +338,11 @@ missions.onEvent = (type, payload) => {
   } else if (type === 'fail') {
     audio.play('busted');
     hud.center('MISI GAGAL', payload.reason);
-    setTimeout(() => missions.start(missions.index), 1200);
+    // v3 audit: only restart into a live game — the timer used to
+    // restart the mission behind the busted/wasted screen too
+    setTimeout(() => {
+      if (state.mode === 'playing') missions.start(missions.index);
+    }, 1200);
   } else if (type === 'chaseHit') {
     hud.center('TABRAKAN!', payload.hits + ' / 3');
     audio.play('punch');
@@ -308,8 +367,8 @@ addEventListener('keydown', (e) => {
       police.addWanted(1);
     });
   }
-  if (e.code === 'Digit1') { combat.setWeapon('fists'); syncHUD(); }
-  if (e.code === 'Digit2') { combat.setWeapon('pistol'); syncHUD(); }
+  if (e.code === 'Digit1' && state.mode === 'playing') { combat.setWeapon('fists'); syncHUD(); }
+  if (e.code === 'Digit2' && state.mode === 'playing') { combat.setWeapon('pistol'); syncHUD(); }
   if (e.code === 'KeyR' && state.mode === 'playing') {
     if (combat.weapon === 'pistol') { combat.ammo = 12; hud.center('RELOAD', '12 peluru'); }
   }
@@ -318,8 +377,11 @@ addEventListener('keyup', (e) => { state.keys[e.code] = false; });
 addEventListener('mousedown', (e) => {
   if (state.mode !== 'playing' || state.inCar || e.button !== 0) return;
   audio.ensure();
-  const res = combat.shoot(camera, peds.group.children.concat([chaseTarget]), (obj) => {
-    if (obj.userData && obj.userData.isPerson !== false) {
+  // v3 audit: the city is a raycast target too — shots now stop at
+  // walls instead of passing through buildings to hit peds behind
+  // them, and only a person (or the chase car) raises the heat
+  const res = combat.shoot(camera, [peds.group, chaseTarget, cityGroup], (obj) => {
+    if (obj === chaseTarget || (obj.userData && obj.userData.isPerson)) {
       peds.fleeFrom(player.position.x, player.position.z, 20);
       police.addWanted(1);
     }
@@ -351,6 +413,17 @@ function tryEnterExitCar() {
     player.position.copy(car.position).addScaledVector(side, 2.5);
     player.visible = true;
     state.heading = car.rotation.y;
+    // v3 audit: put the stolen car back where it was taken from and
+    // give the convertible its own top speed back (v2 deleted the
+    // stolen car from the world and kept whatever speed was last set)
+    if (state.stolenCar) {
+      const c = state.stolenCar;
+      c.visible = true;
+      c.userData.parked = true;
+      c.userData.stolen = false;
+      state.stolenCar = null;
+      car.userData.maxSpeed = state.heroMax || CFG.carMax;
+    }
     hud.center('KELUAR MOBIL', '');
     return;
   }
@@ -366,11 +439,15 @@ function tryEnterExitCar() {
   state.inCar = true;
   state.carSpeed = 0;
   player.visible = false;
-  // swap active car if it is a parked one
+  // swap active car if it is a parked one — and remember it, plus the
+  // hero's own top speed, so the exit can restore both (v3 audit)
   if (c !== car) {
     car.position.copy(c.position);
     car.rotation.copy(c.rotation);
     c.visible = false;
+    state.stolenCar = c;
+    state.heroMax = car.userData.maxSpeed;
+    car.userData.maxSpeed = c.userData.maxSpeed || CFG.carMax;
   }
   audio.play('chime');
   hud.center('MASUK MOBIL', 'WASD mengemudi · E keluar · Spasi rem');
@@ -422,6 +499,7 @@ function updatePlayer(dt) {
     const len = Math.hypot(mx, mz);
     const ang = Math.atan2(mx / len, mz / len) + state.camYaw;
     state.heading = ang;
+    state.footSpeed = speed;
     player.position.x += Math.sin(ang) * speed * dt;
     player.position.z += Math.cos(ang) * speed * dt;
     player.position.x = clamp(player.position.x, -208, 208);
@@ -435,8 +513,11 @@ function updatePlayer(dt) {
       if (d < 1.1) peds.fleeFrom(player.position.x, player.position.z, 6);
     }
   } else {
+    state.footSpeed = 0;
     u.idle();
   }
+  // v3: buildings are solid for the player too (v2 walked through them)
+  collideBuildings(player.position, 0.45);
   // keep the pistol aim pose while armed
   if (combat.weapon === 'pistol') u.armR.rotation.x = -1.35;
 }
@@ -470,6 +551,24 @@ function updateCar(dt) {
   car.position.addScaledVector(fwd, spd * dt);
   car.position.x = clamp(car.position.x, -208, 208);
   car.position.z = clamp(car.position.z, -208, 208);
+  // v3: buildings are solid — hitting one scrubs speed (v2 drove
+  // straight through every building in the city)
+  if (collideBuildings(car.position, 2.3) > 0) state.carSpeed *= 0.55;
+  // hit traffic + parked cars (simple arcade shove + slowdown)
+  for (const oc of traffic.cars) {
+    const d = Math.hypot(oc.position.x - car.position.x, oc.position.z - car.position.z);
+    if (d < 3.1 && Math.abs(spd) > 2) {
+      oc.position.x += fwd.x * 1.2;
+      oc.position.z += fwd.z * 1.2;
+      state.carSpeed *= 0.7;
+      audio.play('punch');
+    }
+  }
+  for (const oc of parked) {
+    if (!oc.visible) continue;
+    const d = Math.hypot(oc.position.x - car.position.x, oc.position.z - car.position.z);
+    if (d < 3.1 && Math.abs(spd) > 2) state.carSpeed *= 0.7;
+  }
   // exhaust puffs while accelerating
   state.exhaustT -= dt;
   if (throttle > 0.3 && state.exhaustT <= 0) {
@@ -526,6 +625,8 @@ function updateChaseTarget(dt) {
   chaseTarget.position.addScaledVector(fwd, u.speed * dt);
   chaseTarget.position.x = clamp(chaseTarget.position.x, -205, 205);
   chaseTarget.position.z = clamp(chaseTarget.position.z, -205, 205);
+  // v3: the chase car respects buildings too (it fled through them)
+  collideBuildings(chaseTarget.position, 2.3);
 }
 
 // ---------- camera ----------
@@ -552,6 +653,9 @@ function updateCamera(dt) {
   const cx = focus.x + Math.sin(state.camYaw) * dist;
   const cz = focus.z + Math.cos(state.camYaw) * dist;
   camera.position.lerp(new THREE.Vector3(cx, height, cz), Math.min(1, dt * 6));
+  // v3 audit: keep the chase camera out of buildings (it used to
+  // clip inside facades whenever the player backed against a wall)
+  collideBuildings(camera.position, 0.7);
   const lookY = focus.y + 1.6;
   camTarget.lerp(new THREE.Vector3(focus.x, lookY, focus.z), Math.min(1, dt * 8));
   camera.lookAt(camTarget);
@@ -643,7 +747,9 @@ function applyShot() {
     state.carSpeed = 26;
     state.camYaw = car.rotation.y + Math.PI;
     police.setWanted(3);
-    missions.start(2);
+    // v3 audit: the cover depicts a chase — start THE CHASE (index 1),
+    // not HOT DELIVERY, so the HUD objective matches the picture
+    missions.start(1);
     state.cash = 2450;
     state.missionsDone = 2;
     state.clockMin = 1142; // 19:02
@@ -669,7 +775,7 @@ function applyShot() {
     stageFlockInView(flockCity, shotCamPos, viewDir, 60, 11);
     state.camYaw = car.rotation.y + Math.PI;
   } else if (SHOT === 'foot') {
-    // on foot on the beachfront promenade, walking north: palms and
+    // on foot on the beachfront promenade, walking north: trees and
     // sea to the left, pastel buildings to the right, peds + dog ahead.
     state.inCar = false;
     player.position.set(-198.7, 0, -10);
@@ -683,6 +789,7 @@ function applyShot() {
     // a pedestrian + the dog walk toward the player on the same sidewalk
     const walker = peds.peds[0];
     walker.position.set(-198.7, 0, 14);
+    walker.userData.along = 14; // v3: update() drives z from userData.along
     walker.userData.heading = Math.PI;
     walker.userData.vertical = true;
     walker.userData.roadLine = -210;
@@ -692,10 +799,11 @@ function applyShot() {
     dog.dog.position.set(-198.0, 0, 11);
     dog.dog.rotation.y = Math.PI;
     dog.update(0);
-    // camera: eye-level behind-right of the player, player in the
-    // right third, sidewalk + palms leading north, gulls overhead.
-    shotCamPos = new THREE.Vector3(player.position.x - 2.5, 2.3, player.position.z - 7.5);
-    shotCamTarget = new THREE.Vector3(player.position.x + 1.5, 1.5, player.position.z + 10);
+    // camera: eye-level behind-right of the player, close enough that
+    // the minifigure build reads (v3), sidewalk + trees leading north,
+    // walker + dog ahead, gulls overhead.
+    shotCamPos = new THREE.Vector3(player.position.x - 1.6, 1.9, player.position.z - 4.4);
+    shotCamTarget = new THREE.Vector3(player.position.x + 0.9, 1.35, player.position.z + 7);
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
     const viewDir = new THREE.Vector3(0.1, 0, 1).normalize();
@@ -741,9 +849,11 @@ function applyShot() {
     const lead = police.cars[0];
     stageBusted(scene, lead.position, lead.rotation.y);
     // camera: three-quarter view from the south-west — hero car left,
-    // marker pillar centre, police + gang right.
-    shotCamPos = new THREE.Vector3(52, 6.5, -52);
-    shotCamTarget = new THREE.Vector3(88, 2.5, -28);
+    // marker pillar centre, police + gang right. v3: pulled closer and
+    // lower so the junction's traffic light (corner 78.7, -41.3) and the
+    // zebra legs sit squarely in frame.
+    shotCamPos = new THREE.Vector3(63, 4.2, -56);
+    shotCamTarget = new THREE.Vector3(93, 2.0, -29);
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
     state.camYaw = car.rotation.y + Math.PI;
@@ -795,6 +905,7 @@ function animate() {
   if (state.mode === 'playing') {
     if (state.inCar) updateCar(dt);
     else updatePlayer(dt);
+    traffic.playerPos = state.inCar ? car.position : player.position;
     traffic.update(dt);
     peds.update(dt);
     flockCity.update(dt);
@@ -806,8 +917,12 @@ function animate() {
     updateChaseTarget(dt);
     combat.update(dt);
     const playerPos = state.inCar ? car.position : player.position;
-    const playerSpeed = state.inCar ? Math.abs(state.carSpeed) : 0;
+    // v3 audit: on foot the bust meter now sees the REAL movement
+    // speed — v2 passed 0, so it filled even while sprinting away
+    const playerSpeed = state.inCar ? Math.abs(state.carSpeed) : state.footSpeed;
     const busted = police.update(dt, playerPos, playerSpeed, !state.inCar);
+    // v3: pursuit cars collide with buildings like everyone else
+    for (const pc of police.cars) collideBuildings(pc.position, 2.3);
     police.decay(dt);
     audio.setSiren(police.wanted > 0, dt);
     // mission logic
@@ -872,5 +987,5 @@ animate();
 window.__game = {
   state, missions, police, health, player, car, hud,
   traffic, peds, renderer, combat, flockCity, gulls,
-  scene, camera, cityGroup,
+  scene, camera, cityGroup, worldInfo,
 };

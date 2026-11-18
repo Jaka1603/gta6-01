@@ -1,11 +1,16 @@
-// PALMBAY HEAT — vehicles.js (v2): SA-style parametric cars.
+// PALMBAY HEAT — vehicles.js (v3): SA-style parametric cars.
 // Proportions from SCALE (car ~4.4 m): glass cabin, racing stripes,
 // plates, hubs, lit headlights, brake lights, contact shadow.
 // Hero = red convertible with interior + seats. Police = black/white
 // LSPD livery with POLICE doors, push bumper, red/blue light bar.
+// v3 audit: traffic turns snap to true cardinal headings (the old
+// float-equality lane pick put cars on the wrong side after turns),
+// traffic also yields to the player, parked cars sit at the real curb
+// (avenues included) and never inside a junction, and setBrake no
+// longer traverses the whole car subtree every frame.
 const THREE = window.THREE;
 import { CFG, PALETTE, SCALE, clamp } from './config.js';
-import { roadCoord, nearestRoadCoord } from './world.js';
+import { roadCoord, nearestRoadCoord, roadHalfAt } from './world.js';
 import { blobTexture, plateTexture, policeDoorTexture, glowTexture } from './textures.js';
 import { glowSprite } from './effects.js';
 
@@ -340,10 +345,12 @@ export function heroCar() {
   return c;
 }
 
-// brake lights on/off (emissive + glow sprite)
+// brake lights on/off (emissive + glow sprite). v3: cached — the
+// traverse only runs when the state actually flips, not every frame.
 export function setBrake(car, on) {
   const u = car.userData;
-  if (!u.brakeMat) return;
+  if (!u.brakeMat || u.brakeOn === on) return;
+  u.brakeOn = on;
   u.brakeMat.emissiveIntensity = on ? 4 : 1;
   car.traverse((o) => {
     if (o.name === 'brakeGlow') o.material.opacity = on ? 0.85 : 0.0;
@@ -403,6 +410,17 @@ export class Traffic {
           if (to.dot(fwd) > 0.7) { speed = Math.min(speed, u.speed * 0.25); break; }
         }
       }
+      // v3 audit: traffic also yields to the PLAYER (car or on foot) —
+      // it used to drive straight through them
+      if (speed === u.speed && this.playerPos) {
+        const dx = this.playerPos.x - car.position.x;
+        const dz = this.playerPos.z - car.position.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 10 && d > 0.01) {
+          const dot = (dx / d) * fwd.x + (dz / d) * fwd.z;
+          if (dot > 0.7) speed = Math.min(speed, u.speed * 0.2);
+        }
+      }
       // brake lights when slowing for traffic ahead
       setBrake(car, speed < u.speed * 0.6);
       car.position.addScaledVector(fwd, speed * dt);
@@ -411,18 +429,23 @@ export class Traffic {
       if (car.position.x < -215) car.position.x = 215;
       if (car.position.z > 215) car.position.z = -215;
       if (car.position.z < -215) car.position.z = 215;
-      // maybe turn at an intersection
+      // maybe turn at an intersection. v3 audit: the heading is first
+      // normalised to a true cardinal direction and the lane is
+      // derived from it — the old code compared rotation.y against 0
+      // and π/2 with exact float equality, so after a turn most cars
+      // snapped to the WRONG side of the road.
       const nx = nearestRoadCoord(car.position.x);
       const nz = nearestRoadCoord(car.position.z);
       const nearX = Math.abs(car.position.x - nx) < 1.2;
       const nearZ = Math.abs(car.position.z - nz) < 1.2;
       if (u.turnCooldown <= 0 && nearX && nearZ && this.rand() < 0.3) {
-        u.vertical = !u.vertical;
-        const turn = this.rand() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
-        car.rotation.y += turn;
-        // snap to the road line
-        if (u.vertical) car.position.x = nx + (car.rotation.y === 0 ? 3.2 : -3.2);
-        else car.position.z = nz + (car.rotation.y === Math.PI / 2 ? 3.2 : -3.2);
+        let h = Math.round(car.rotation.y / (Math.PI / 2));
+        h = ((h % 4) + 4) % 4;              // 0:+Z 1:+X 2:-Z 3:-X
+        h = (h + (this.rand() < 0.5 ? 1 : 3)) % 4;
+        car.rotation.y = h * Math.PI / 2;
+        u.vertical = (h % 2 === 0);
+        if (u.vertical) car.position.x = nx + (h === 0 ? 3.2 : -3.2);
+        else car.position.z = nz + (h === 1 ? 3.2 : -3.2);
         u.turnCooldown = 4;
       }
     }
@@ -438,13 +461,27 @@ export function spawnParked(scene, rand, n = 10) {
     const car = makeCar(style, color);
     const line = Math.floor(rand() * (CFG.gridN + 1));
     const coord = roadCoord(line);
-    const along = (rand() * 2 - 1) * 190;
+    // v3 audit: park in the curb lane of THIS road (avenues are 20 m
+    // wide — the old fixed +5.4 m sat in a through lane there), and
+    // never inside a junction box, where the car would block the
+    // crossing road's lanes.
+    const curb = roadHalfAt(coord) - 1.05;
+    let along = (rand() * 2 - 1) * 190;
+    for (let tries = 0; tries < 10; tries++) {
+      let inJunction = false;
+      for (let j = 0; j <= CFG.gridN; j++) {
+        const q = roadCoord(j);
+        if (Math.abs(along - q) < roadHalfAt(q) + 4.5) { inJunction = true; break; }
+      }
+      if (!inJunction) break;
+      along = (rand() * 2 - 1) * 190;
+    }
     const vertical = rand() < 0.5;
     if (vertical) {
-      car.position.set(coord + 5.4, 0, along);
+      car.position.set(coord + curb, 0, along);
       car.rotation.y = rand() < 0.5 ? 0 : Math.PI;
     } else {
-      car.position.set(along, 0, coord + 5.4);
+      car.position.set(along, 0, coord + curb);
       car.rotation.y = rand() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
     }
     car.userData.parked = true;

@@ -319,3 +319,160 @@ export function billboardTexture(text, sub, bg, fg) {
     ctx.strokeRect(8, 8, w - 16, h - 16);
   });
 }
+
+// --- v3 zebra crossing tile: worn white bars on transparency ---
+// Bars run along V (the traffic direction once laid); the tile repeats
+// along U across the road. One tile = ~4.2 m of crossing width.
+export function zebraTexture() {
+  return canvasTexture(128, 128, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = 'rgba(245,245,235,0.92)';
+    for (let x = 5; x < w; x += 32) ctx.fillRect(x, 4, 17, h - 8);
+    // worn patches so the paint reads used, not freshly sprayed
+    // (tiny local LCG — this file is seeded-RNG only)
+    let seed = 1234567;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    ctx.fillStyle = 'rgba(40,40,44,0.25)';
+    for (let i = 0; i < 26; i++) {
+      ctx.fillRect(rnd() * w, rnd() * h, 3 + rnd() * 7, 2 + rnd() * 4);
+    }
+  });
+}
+
+// --- v3 stop sign face: red octagon field, white border + STOP ---
+// Drawn full-bleed: the octagonal cap geometry cuts the corners.
+export function stopSignTexture() {
+  return canvasTexture(256, 256, (ctx, w, h) => {
+    ctx.fillStyle = '#c0272d';
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#f5f2ea';
+    ctx.lineWidth = 10;
+    ctx.strokeRect(18, 18, w - 36, h - 36);
+    ctx.fillStyle = '#f5f2ea';
+    ctx.font = 'bold 84px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('STOP', w / 2, h / 2 + 4);
+  });
+}
+
+// --- v3 minifig face: classic smile printed on the head cylinder ---
+// White background on purpose: the head material's colour multiplies
+// the map, so the white becomes the figure's skin tone and only the
+// printed features stay dark. Face is centred at u = 0.5.
+export function faceTexture() {
+  return canvasTexture(256, 256, (ctx, w, h) => {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#26211c';
+    // eyes
+    for (const dx of [-30, 30]) {
+      ctx.beginPath();
+      ctx.ellipse(w / 2 + dx, 108, 9, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // the classic smile
+    ctx.strokeStyle = '#26211c';
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(w / 2, 128, 34, Math.PI * 0.18, Math.PI * 0.82);
+    ctx.stroke();
+    // soft cheeks
+    ctx.fillStyle = 'rgba(232,140,110,0.55)';
+    for (const dx of [-52, 52]) {
+      ctx.beginPath();
+      ctx.arc(w / 2 + dx, 140, 13, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+}
+
+// --- v3 minifig torso prints (transparent plate over the torso) ---
+// kind: 'civil' (variant 0..3) | 'police' | 'gang' | 'hero'
+export function torsoPrintTexture(kind, variant = 0) {
+  return canvasTexture(256, 256, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    const ink = 'rgba(30,26,34,0.85)';
+    const line = (x0, y0, x1, y1, lw = 5) => {
+      ctx.strokeStyle = ink; ctx.lineWidth = lw; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    };
+    if (kind === 'police') {
+      // navy uniform print: tie, button line, two pockets, gold badge
+      ctx.fillStyle = ink;
+      ctx.beginPath();
+      ctx.moveTo(w / 2 - 13, 8); ctx.lineTo(w / 2 + 13, 8);
+      ctx.lineTo(w / 2 + 5, 74); ctx.lineTo(w / 2 - 5, 74);
+      ctx.closePath(); ctx.fill();
+      for (let y = 96; y <= 216; y += 30) {
+        ctx.beginPath(); ctx.arc(w / 2, y, 5, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.strokeStyle = ink; ctx.lineWidth = 5;
+      ctx.strokeRect(26, 118, 62, 46);
+      ctx.strokeRect(w - 88, 118, 62, 46);
+      // gold badge on the left chest
+      ctx.fillStyle = '#d8a030';
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? 17 : 8;
+        const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+        const x = 57 + Math.cos(a) * r, y = 84 + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath(); ctx.fill();
+      // shoulder bars
+      ctx.fillStyle = ink;
+      ctx.fillRect(14, 16, 44, 10);
+      ctx.fillRect(w - 58, 16, 44, 10);
+    } else if (kind === 'gang') {
+      // white undershirt V under the green shirt + gold chain
+      ctx.fillStyle = 'rgba(245,245,240,0.95)';
+      ctx.beginPath();
+      ctx.moveTo(w / 2 - 34, 6); ctx.lineTo(w / 2 + 34, 6);
+      ctx.lineTo(w / 2, 74);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#d8a030'; ctx.lineWidth = 7;
+      ctx.beginPath(); ctx.arc(w / 2, 34, 40, Math.PI * 0.25, Math.PI * 0.75); ctx.stroke();
+      ctx.strokeStyle = ink; ctx.lineWidth = 5;
+      ctx.strokeRect(30, 132, 58, 44);
+    } else if (kind === 'hero') {
+      // tank-top shading: strap shadows + a low neckline shadow
+      ctx.fillStyle = 'rgba(30,26,34,0.20)';
+      ctx.fillRect(16, 0, 30, 66);
+      ctx.fillRect(w - 46, 0, 30, 66);
+      ctx.beginPath();
+      ctx.arc(w / 2, 2, 52, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.lineWidth = 10; ctx.strokeStyle = 'rgba(30,26,34,0.20)';
+      ctx.stroke();
+    } else if (variant === 1) {
+      // horizontal stripes
+      ctx.fillStyle = 'rgba(30,26,34,0.28)';
+      for (let y = 44; y < h - 20; y += 44) ctx.fillRect(8, y, w - 16, 17);
+    } else if (variant === 2) {
+      // necklace + pendant
+      ctx.strokeStyle = '#d8a030'; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.arc(w / 2, 26, 44, Math.PI * 0.25, Math.PI * 0.75); ctx.stroke();
+      ctx.fillStyle = '#d8a030';
+      ctx.beginPath(); ctx.arc(w / 2, 76, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = ink; ctx.lineWidth = 5;
+      ctx.strokeRect(28, 138, 56, 42);
+    } else if (variant === 3) {
+      // big chest emblem
+      ctx.fillStyle = 'rgba(245,245,240,0.9)';
+      ctx.beginPath(); ctx.arc(w / 2, 108, 40, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = ink;
+      ctx.font = 'bold 52px Arial, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('PB', w / 2, 112);
+    } else {
+      // plain tee: chest pocket + button placket
+      ctx.strokeStyle = ink; ctx.lineWidth = 5;
+      ctx.strokeRect(30, 120, 58, 46);
+      line(w / 2, 20, w / 2, 90, 4);
+    }
+  });
+}

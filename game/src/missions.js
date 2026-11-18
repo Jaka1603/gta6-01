@@ -1,5 +1,7 @@
-// PALMBAY HEAT — missions.js: 5-mission story chain for Mama Rosa.
+// PALMBAY HEAT — missions.js (v3): 5-mission story chain for Mama Rosa.
 // Checkpoint pillars, objective banner, timer, cash rewards.
+// v3 audit: chase missions can no longer be completed by simply
+// driving to the target point — only the 3 rams count.
 const THREE = window.THREE;
 import { CFG } from './config.js';
 import { roadCoord } from './world.js';
@@ -8,7 +10,10 @@ export const MISSION_DEFS = [
   {
     id: 1, name: 'PICKUP AT THE PIER',
     brief: 'Mama Rosa needs a package from the Sunset Pier. Drive to the marker.',
-    target: [-180, 60], time: 0, reward: CFG.missionReward[0],
+    // v3 audit fix: the old target (-180, 60) is a block centre — INSIDE
+    // whatever building stands there, unreachable once building collision
+    // exists. The pier approach on the sand is the story spot.
+    target: [-236, 60], time: 0, reward: CFG.missionReward[0],
     text: 'Ambil paket di Sunset Pier.',
   },
   {
@@ -133,6 +138,10 @@ export class Missions {
     }
     // escape mission: complete when wanted drops to 0
     if (def.escape) return null; // main checks wanted
+    // chase mission: completes ONLY via registerChaseHit rams — the
+    // generic reach-the-target check below used to finish it for free
+    // because the target point is the chase car's start position
+    if (def.chase) return null;
     const dx = playerPos.x - def.target[0];
     const dz = playerPos.z - def.target[1];
     if (Math.hypot(dx, dz) < 6) {
