@@ -1327,6 +1327,17 @@ export function buildWorld(scene, rand) {
     { text: "MAMA ROSA'S", color: '#ffb347', bx: 3, bz: 3, h: 8 },
     { text: 'PALM BAY MOTORS', color: '#59e6ff', bx: 4, bz: 2, h: 8 },
     { text: 'SUNSET PIER', color: '#ff7e5f', bx: 0, bz: 5, h: 9 },
+    // v8 (top-1 density lesson): a named business on every street —
+    // the winner's city reads alive because every block introduces
+    // itself. Same mounting rule: southmost building, south face.
+    { text: 'HOTEL SERIWA', color: '#ffd23f', bx: 0, bz: 2, h: 8 },
+    { text: 'LAGUNA SUITES', color: '#59e6ff', bx: 1, bz: 4, h: 8 },
+    { text: 'FIBA PALACE', color: '#ff5fa2', bx: 2, bz: 2, h: 10 },
+    { text: 'MALUN HOTEL', color: '#7dff8a', bx: 4, bz: 4, h: 9 },
+    { text: 'CLUB NEON', color: '#c07dff', bx: 3, bz: 2, h: 7 },
+    { text: 'TACO SOL', color: '#ffb347', bx: 2, bz: 3, h: 6 },
+    { text: 'LIQUOR 24H', color: '#ff7e5f', bx: 4, bz: 3, h: 6 },
+    { text: 'PORTSIDE INN', color: '#7dd8ff', bx: 5, bz: 5, h: 7 },
   ];
   for (const s of signDefs) {
     const list = blockBuildings[s.bx + ',' + s.bz] || [];
@@ -1554,6 +1565,57 @@ export function buildWorld(scene, rand) {
       { x0: -HALF - 13.15, z0: -180, x1: -HALF - 12.65, z1: 53, top: 1.2 },
       { x0: -HALF - 13.15, z0: 67, x1: -HALF - 12.65, z1: 180, top: 1.2 }
     );
+  }
+
+  // -- v8 beach props: instanced umbrellas + towels on the sand --
+  // Top-1's beach reads alive from props alone. Three instanced
+  // meshes total (poles, canopies with per-instance colour, towels);
+  // poles are solid via small building rects. Kept off the pier
+  // approach (z 44..76) and the beach bar's deck.
+  {
+    const spots = [];
+    const umbCols = [0xe74c3c, 0xf1c40f, 0x2a9d8f, 0xff5fa2, 0x59a7ff, 0xff8c42];
+    for (let z = -176; z <= 184; z += 18) {
+      if (z > 40 && z < 80) continue;         // pier + bar approach
+      const x = -238 - (rand() * 5);
+      spots.push({ x, z: z + (rand() - 0.5) * 6, c: umbCols[spots.length % umbCols.length] });
+    }
+    const dummy = new THREE.Object3D();
+    const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, 2.3, 6);
+    poleGeo.translate(0, 1.15, 0);
+    const poles = new THREE.InstancedMesh(poleGeo,
+      new THREE.MeshStandardMaterial({ color: 0xf0ead8, roughness: 0.6 }), spots.length);
+    const canopyGeo = new THREE.ConeGeometry(1.7, 0.55, 9);
+    canopyGeo.translate(0, 2.35, 0);
+    const canopies = new THREE.InstancedMesh(canopyGeo,
+      new THREE.MeshStandardMaterial({ roughness: 0.85, flatShading: true }), spots.length);
+    const towelGeo = new THREE.BoxGeometry(0.9, 0.04, 1.9);
+    towelGeo.translate(0, 0.03, 0);
+    const towels = new THREE.InstancedMesh(towelGeo,
+      new THREE.MeshStandardMaterial({ roughness: 0.95 }), spots.length);
+    const col = new THREE.Color();
+    spots.forEach((s, i) => {
+      dummy.position.set(s.x, 0, s.z);
+      dummy.rotation.set(0, rand() * TAU, 0);
+      dummy.updateMatrix();
+      poles.setMatrixAt(i, dummy.matrix);
+      canopies.setMatrixAt(i, dummy.matrix);
+      canopies.setColorAt(i, col.set(s.c));
+      dummy.position.set(s.x + 1.6, 0, s.z + 0.8);
+      dummy.updateMatrix();
+      towels.setMatrixAt(i, dummy.matrix);
+      towels.setColorAt(i, col.set(s.c).multiplyScalar(0.85));
+      worldInfo.buildingRects.push({ x0: s.x - 0.3, z0: s.z - 0.3, x1: s.x + 0.3, z1: s.z + 0.3 });
+    });
+    poles.instanceMatrix.needsUpdate = true;
+    canopies.instanceMatrix.needsUpdate = true;
+    towels.instanceMatrix.needsUpdate = true;
+    if (canopies.instanceColor) canopies.instanceColor.needsUpdate = true;
+    if (towels.instanceColor) towels.instanceColor.needsUpdate = true;
+    canopies.castShadow = true;
+    poles.frustumCulled = canopies.frustumCulled = towels.frustumCulled = false;
+    group.add(poles, canopies, towels);
+    worldInfo.beachProps = spots.length;
   }
 
   // gang territory in world coords (for minimap tint + staging)

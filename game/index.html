@@ -24,16 +24,79 @@
   .stars { top: 144px; right: 16px; font-size: 26px; color: #ffd23f; letter-spacing: 4px; }
   .stars.hot { color: #ff4040; animation: blink .5s steps(2) infinite; }
   @keyframes blink { 50% { opacity: .35; } }
-  .weapon { top: 110px; right: 16px; font-size: 15px; color: #ffe9a0; }
-  .zone { top: 58px; left: 16px; font-size: 14px; color: #9fe8a8; display: none;
-    background: rgba(20,40,20,.55); padding: 6px 10px; border-left: 4px solid #2e9e4a; border-radius: 4px; }
+  .weapon { display: none; } /* v8: replaced by the slot row */
+  .zone { display: none !important; } /* v8: replaced by the district block */
   .objective { top: 14px; left: 16px; max-width: 460px; font-size: 15px; color: #ffd23f;
     background: rgba(20,10,20,.55); padding: 8px 12px; border-left: 4px solid #ffd23f; border-radius: 4px; }
-  .timer { top: 96px; left: 16px; font-size: 24px; color: #fff; background: rgba(180,40,40,.75);
-    padding: 4px 12px; border-radius: 4px; display: none; }
-  .speed { bottom: 18px; right: 18px; font-size: 22px; color: #fff; }
-  .bust { bottom: 52px; right: 18px; font-size: 16px; color: #ff8080; display: none;
+  /* v8 mission card internals */
+  .mc-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+  .mc-head b { font-size: 15px; letter-spacing: 1px; color: #ffd23f; }
+  .mc-stage { background: #ffd23f; color: #1a1420; font-size: 11px; font-weight: bold;
+    padding: 2px 8px; border-radius: 999px; letter-spacing: 1px; text-shadow: none; white-space: nowrap; }
+  .mc-obj { color: #fff; font-size: 14px; margin-top: 4px; font-weight: normal; }
+  .mc-count { color: #ffd23f; font-weight: bold; }
+  .mc-next { color: #9fe8ff; font-size: 12px; margin-top: 3px; letter-spacing: .5px; }
+  .timer { top: 158px; left: 50%; transform: translateX(-50%); font-size: 24px; color: #fff;
+    background: rgba(180,40,40,.75); padding: 4px 12px; border-radius: 4px; display: none; }
+  .speed { bottom: 18px; right: 18px; font-size: 38px; color: #fff; letter-spacing: 1px; }
+  .speed small { font-size: 14px; color: #ffe9c9; }
+  .bust { bottom: 66px; right: 18px; font-size: 16px; color: #ff8080; display: none;
     animation: blink .4s steps(2) infinite; }
+  /* v8 HUD panels */
+  .policepanel { top: 128px; left: 16px; width: 252px; font-size: 12.5px; color: #dfe9ff;
+    background: rgba(10,16,34,.78); border: 1px solid #4a6a9a; border-left: 4px solid #ff4040;
+    border-radius: 6px; padding: 7px 10px; text-shadow: none; }
+  .pp-head { color: #ffb0b0; letter-spacing: 1px; font-size: 12px; margin-bottom: 4px; }
+  .pp-row { display: flex; gap: 8px; align-items: baseline; padding: 1.5px 0; }
+  .pp-row b { color: #fff; min-width: 74px; }
+  .pp-role { color: #9fc3ff; flex: 1; font-size: 11.5px; letter-spacing: .5px; }
+  .pp-dist { color: #ffd23f; }
+  .pp-status { margin-top: 4px; color: #ff8080; letter-spacing: 1.5px; font-size: 11.5px;
+    animation: blink 1s steps(2) infinite; }
+  .weaponslots { top: 108px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; }
+  .wslot { width: 52px; padding: 4px 0 3px; text-align: center; border-radius: 7px;
+    background: rgba(12,14,22,.72); border: 2px solid rgba(255,255,255,.28); text-shadow: none; }
+  .wslot i { display: block; font-style: normal; font-size: 17px; line-height: 1.1; }
+  .wslot b { display: block; font-size: 10px; color: #ffe9c9; letter-spacing: .5px; }
+  .wslot span { display: block; font-size: 10px; color: #9fe8a8; min-height: 12px; }
+  .wslot.active { border-color: #ff9a3c; background: rgba(80,40,8,.85);
+    box-shadow: 0 0 12px rgba(255,150,60,.55); }
+  .wslot.locked { opacity: .38; }
+  .wslot.locked span { color: #bbb; }
+  .crewcards { top: 292px; right: 16px; width: 196px; display: flex; flex-direction: column; gap: 6px; }
+  .crewcard { background: rgba(12,14,22,.78); border: 1px solid #5a6a8a; border-left: 4px solid #8a97ad;
+    border-radius: 6px; padding: 6px 9px; font-size: 12px; text-shadow: none; }
+  .crewcard b { display: block; color: #fff; font-size: 12.5px; letter-spacing: .5px; }
+  .crewcard .crole { display: block; color: #9fc3ff; font-size: 11px; }
+  .crewcard .ccd { display: block; color: #ffd23f; font-size: 11.5px; margin-top: 2px; }
+  .crewcard.ready { border-left-color: #3dff7a; }
+  .crewcard.cooling { opacity: .75; }
+  .rank { top: 182px; right: 16px; width: 196px; font-size: 12.5px; text-shadow: none; }
+  .rk-head { display: flex; justify-content: space-between; color: #ffe9c9;
+    background: rgba(12,14,22,.72); padding: 4px 8px; border-radius: 5px 5px 0 0; }
+  .rk-head b { color: #ffd23f; letter-spacing: .5px; }
+  .rk-bar { height: 7px; background: rgba(0,0,0,.6); border-radius: 0 0 5px 5px; overflow: hidden; }
+  .rk-fill { height: 100%; background: linear-gradient(90deg, #ff9a3c, #ffd23f); }
+  .statusline { top: 224px; right: 16px; font-size: 13px; color: #ff8080; letter-spacing: 2px;
+    animation: blink 1s steps(2) infinite; }
+  .district { left: 16px; bottom: 218px; text-shadow: 0 2px 6px rgba(0,0,0,.85); }
+  .dz-name { font-size: 27px; font-style: italic; letter-spacing: 2px; color: #fff; line-height: 1.05; }
+  .dz-row { display: flex; align-items: center; gap: 9px; margin-top: 3px; font-size: 12px; color: #ffe9c9; }
+  .dz-bar { width: 110px; height: 7px; background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.5);
+    border-radius: 4px; overflow: hidden; }
+  .dz-fill { height: 100%; background: linear-gradient(90deg, #2e9e4a, #7dff8a); }
+  .radio { bottom: 64px; right: 18px; font-size: 13.5px; color: #9fe8ff; }
+  .targetbar { bottom: 108px; right: 18px; width: 210px; font-size: 13px; text-shadow: none;
+    background: rgba(12,14,22,.78); border: 1px solid #4a6a8a; border-radius: 6px; padding: 6px 10px; }
+  .targetbar b { color: #7dd8ff; display: block; margin-bottom: 4px; }
+  .tg-bar { height: 8px; background: rgba(0,0,0,.6); border-radius: 4px; overflow: hidden; }
+  .tg-fill { height: 100%; background: linear-gradient(90deg, #ff5a5a, #ffd23f, #3dff7a); }
+  .targetbar span { color: #ffe9c9; font-size: 11.5px; }
+  .health .hcol { display: flex; flex-direction: column; gap: 3px; }
+  .health .hrow { display: flex; align-items: center; gap: 6px; }
+  .health .hrow em { font-style: normal; font-size: 10.5px; color: #ffe9c9; width: 20px; }
+  .health .hrow span { font-size: 12.5px; min-width: 26px; }
+  .health .bar.armour .fill { background: linear-gradient(90deg, #59a7ff, #7dd8ff); }
   .center { top: 24%; left: 50%; transform: translate(-50%, -50%); text-align: center;
     opacity: 0; transition: opacity .3s; }
   .center.show { opacity: 1; }
@@ -49,7 +112,7 @@
     border: 2px solid #ffd23f; border-radius: 10px; padding: 6px 14px;
     font-size: 16px; font-weight: bold; color: #ffd23f; white-space: nowrap; }
   /* ---------- v6 HUD additions ---------- */
-  .aim { top: 178px; right: 16px; font-size: 13px; color: #9fe8ff; letter-spacing: 1px; }
+  .aim { top: 252px; right: 16px; font-size: 13px; color: #9fe8ff; letter-spacing: 1px; }
   .locktag { top: 56%; left: 50%; transform: translateX(-50%); font-size: 14px;
     color: #ff6060; letter-spacing: 3px; }
   .titlecard { top: 16%; left: 50%; transform: translate(-50%, -50%); text-align: center;
@@ -155,11 +218,21 @@
     .clock { top: 40px; right: 12px; font-size: 13px; }
     .health { top: 62px; right: 12px; font-size: 13px; }
     .health .bar { width: 84px; }
-    .weapon { top: 88px; right: 12px; font-size: 13px; }
-    .aim { top: 142px; right: 12px; font-size: 11px; }
+    .aim { top: 216px; right: 12px; font-size: 11px; }
     .stars { top: 116px; right: 12px; font-size: 20px; }
+    .rank { top: 148px; right: 12px; width: 158px; font-size: 11px; }
+    .statusline { top: 190px; right: 12px; font-size: 11px; }
+    .crewcards { display: none; } /* small screens: the full crew cards yield to the mission card; abilities stay on Z/X/V + pause */
+    .weaponslots { top: calc(238px + env(safe-area-inset-top)); bottom: auto; left: auto; right: 12px; transform: none; }
+    .wslot { display: none; width: 44px; }
+    .wslot.active { display: block; } /* small screens show just the active weapon chip */
+    .wslot i { font-size: 13px; }
+    .wslot b { font-size: 8.5px; }
+    .wslot span { font-size: 8.5px; }
+    .policepanel { width: 208px; font-size: 11px; }
+    .district { bottom: 140px; }
+    .dz-name { font-size: 20px; }
     .objective { max-width: 54vw; font-size: 13px; }
-    .zone { max-width: 54vw; font-size: 12px; }
     .center b { font-size: 27px; }
     .center span { font-size: 15px; }
     .logo { font-size: 42px; letter-spacing: 3px; }
@@ -168,15 +241,83 @@
     .menu button { width: min(320px, 84vw); }
     .controls { font-size: 12px; line-height: 1.75; }
   }
+  body.touch .district { bottom: calc(140px + env(safe-area-inset-bottom)); left: 12px; }
+  body.touch .policepanel { top: auto; bottom: calc(300px + env(safe-area-inset-bottom)); left: 12px; }
+  body.touch .radio { bottom: calc(206px + env(safe-area-inset-bottom)); }
+  body.touch .targetbar { bottom: calc(300px + env(safe-area-inset-bottom)); }
 
   /* ---------- Title / end / pause ---------- */
   .overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
     background: linear-gradient(180deg, rgba(20,10,30,.25), rgba(20,10,30,.72)); }
   .hidden { display: none !important; }
   .panel { text-align: center; max-width: 620px; padding: 30px 40px; }
-  .logo { font-size: 64px; letter-spacing: 6px; margin: 0; color: #ffd23f;
-    text-shadow: 0 0 24px #ff7e5f, 0 4px 0 #7a2a1a, 0 8px 24px rgba(0,0,0,.7); font-style: italic; }
-  .logo small { display: block; font-size: 22px; letter-spacing: 12px; color: #ff9a6a; margin-top: 4px; }
+  .logo { font-size: 64px; letter-spacing: 6px; margin: 0; font-style: italic;
+    background: linear-gradient(180deg, #fff3b0 5%, #ffd23f 38%, #ff7e5f 72%, #e2703a 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 3px 0 rgba(122,42,26,.9)) drop-shadow(0 10px 26px rgba(0,0,0,.65)); }
+  .logo small { display: block; font-size: 22px; letter-spacing: 12px; color: #ff9a6a; margin-top: 4px;
+    -webkit-text-fill-color: #ff9a6a; }
+  /* short viewports: the whole title column must fit — a clipped
+     logo reads as a bug on 720p windows */
+  @media (max-height: 760px) {
+    .panel { padding: 8px 26px; max-width: 700px; }
+    .logo { font-size: 46px; }
+    .logo small { font-size: 16px; margin-top: 2px; }
+    .tagline { font-size: 14px; margin: 4px 0 8px; }
+    .menu button { padding: 8px 20px; margin: 5px auto; font-size: 17px; }
+    .slotcards { margin: 8px auto 2px; }
+    .slotcard { width: 158px; padding: 7px 9px; font-size: 11.5px; }
+    .controls { margin-top: 10px; font-size: 11.5px; line-height: 1.5; }
+    .titlefoot { display: none; }
+    #save-line { margin-top: 8px; }
+  }
+  /* v8 title: save-slot cards + inline settings row */
+  .slotcards { display: flex; gap: 10px; justify-content: center; margin: 16px auto 4px; flex-wrap: wrap; }
+  .slotcard { width: 168px; text-align: left; background: rgba(10,14,24,.82); color: #dfe9ff;
+    border: 2px solid #4a6a8a; border-radius: 9px; padding: 9px 12px; cursor: pointer;
+    font-family: inherit; text-shadow: none; }
+  .slotcard.sel { border-color: #ffd23f; box-shadow: 0 0 14px rgba(255,210,63,.45); }
+  .slotcard b { display: block; color: #ffd23f; font-size: 13px; letter-spacing: 1px; }
+  .slotcard span { display: block; font-size: 12px; color: #cfe3ee; margin-top: 2px; line-height: 1.45; }
+  .slotcard .empty { color: #7d8ea3; font-style: italic; }
+  .settingsrow { display: none; gap: 8px; justify-content: center; margin-top: 12px; flex-wrap: wrap; }
+  .settingsrow.show { display: flex; }
+  .settingsrow button { background: rgba(0,0,0,.5); color: #ffe9c9; border: 1.5px solid #9ab;
+    border-radius: 6px; padding: 8px 14px; font-family: inherit; font-weight: bold; cursor: pointer;
+    font-size: 13.5px; letter-spacing: 1px; }
+  .titlefoot { margin-top: 14px; font-size: 12px; color: #9fb8cc; letter-spacing: 1px; }
+  /* v8 pause: multi-tab MAP / STATS / SETTINGS / SAVE */
+  #pause .panel { max-width: 640px; width: min(640px, 94vw); }
+  .tabs { display: flex; gap: 6px; justify-content: center; margin: 14px 0 12px; flex-wrap: wrap; }
+  .tabbtn { background: rgba(0,0,0,.5); color: #cfe3ee; border: 1.5px solid #4a6a8a; border-radius: 999px;
+    padding: 7px 16px; font-family: inherit; font-weight: bold; cursor: pointer; font-size: 13.5px;
+    letter-spacing: 1.5px; }
+  .tabbtn.sel { background: linear-gradient(180deg, #e07b39, #b84a1a); color: #fff; border-color: #ffd23f; }
+  .tabpage { display: none; text-align: left; }
+  .tabpage.show { display: block; }
+  #bigmap { width: 100%; max-width: 520px; aspect-ratio: 1; display: block; margin: 0 auto;
+    border: 2px solid rgba(255,255,255,.6); border-radius: 10px; background: #16202e; }
+  .maphint { text-align: center; font-size: 12.5px; color: #9fb8cc; margin-top: 8px; }
+  .statsgrid { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+  .ring { width: 118px; height: 118px; border-radius: 50%; flex: none; margin: 4px auto;
+    display: flex; align-items: center; justify-content: center; position: relative; }
+  .ring::after { content: ''; position: absolute; inset: 11px; border-radius: 50%; background: #141021; }
+  .ring b { position: relative; z-index: 1; font-size: 21px; color: #ffd23f; }
+  .ringwrap { text-align: center; width: 132px; flex: none; margin: 0 auto; }
+  .ringwrap span { font-size: 11.5px; color: #9fb8cc; letter-spacing: 1.5px; }
+  .checklist { flex: 1; min-width: 230px; }
+  .checkrow { margin-bottom: 9px; font-size: 13px; color: #ffe9c9; }
+  .checkrow .cr-head { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  .checkbar { height: 8px; background: rgba(0,0,0,.6); border-radius: 4px; overflow: hidden; }
+  .checkbar div { height: 100%; background: linear-gradient(90deg, #2e9e4a, #7dff8a); }
+  .career { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; font-size: 13px;
+    color: #dfe9ff; margin-top: 10px; }
+  .career b { color: #ffd23f; float: right; }
+  .medals { margin-top: 12px; font-size: 13px; color: #ffe9c9; line-height: 2; }
+  .medal { display: inline-block; min-width: 27px; text-align: center; border-radius: 5px;
+    padding: 1px 5px; margin-right: 4px; font-weight: bold; font-size: 12px; color: #1a1420; }
+  .medal.G { background: #ffd23f; } .medal.S { background: #cfd8e3; } .medal.B { background: #d88a4a; }
+  .medal.none { background: rgba(255,255,255,.14); color: #8a97ad; }
   .tagline { font-size: 16px; color: #ffe9c9; margin: 10px 0 24px; font-style: italic; }
   .menu button { display: block; width: 320px; margin: 10px auto; padding: 13px 20px; font-size: 19px;
     font-weight: bold; letter-spacing: 2px; color: #fff; background: linear-gradient(180deg, #e07b39, #b84a1a);
@@ -200,21 +341,28 @@
   <div class="panel">
     <h1 class="logo">PALMBAY HEAT<small>EST. 1987 · PALM BAY</small></h1>
     <p class="tagline">"One wheelman. One fixer. One city that never cools down."</p>
-    <p class="tagline" style="font-size:13px;color:#9fb8cc;margin-top:-14px">v6 — furnished houses, an arsenal to find, police who shoot back, cars that burn, two ways to aim</p>
+    <p class="tagline" style="font-size:13px;color:#9fb8cc;margin-top:-14px">v8 — staged missions, named police units + air support, a crew at your back, ranks to climb, day into night</p>
     <div class="menu">
-      <button id="btn-new">▶ NEW GAME</button>
       <button id="btn-continue">↻ CONTINUE</button>
-      <button id="btn-quit" class="ghost">💾 SAVE &amp; QUIT</button>
+      <button id="btn-new">▶ NEW GAME</button>
+      <button id="btn-settings" class="ghost">⚙ SETTINGS</button>
     </div>
+    <div class="settingsrow" id="settings-row">
+      <button id="btn-aim-title" type="button">⌖ AIM: AUTO</button>
+      <button id="btn-mute-title" type="button">🔊 SOUND: ON</button>
+    </div>
+    <div class="slotcards" id="slot-cards"></div>
     <div class="controls">
       <b>W A S D</b> — walk / drive &nbsp;·&nbsp; <b>SHIFT</b> — run<br>
       <b>E</b> — enter / exit car (steal parked cars!) &nbsp;·&nbsp; <b>SPACE</b> — brake<br>
       <b>F</b> — punch &nbsp;·&nbsp; <b>CLICK</b> — shoot &nbsp;·&nbsp; <b>1–6</b> — weapons &nbsp;·&nbsp; <b>R</b> — reload<br>
-      <b>C</b> — aim mode (AUTO lock-on / MANUAL) &nbsp;·&nbsp; <b>P / ESC</b> — pause &nbsp;·&nbsp; <b>M</b> — mute<br>
+      <b>Z</b> Mira: swap plates &nbsp;·&nbsp; <b>X</b> Lio: quick fix &nbsp;·&nbsp; <b>V</b> Kiki: eyes out<br>
+      <b>C</b> — aim mode (AUTO lock-on / MANUAL) &nbsp;·&nbsp; <b>P / ESC</b> — pause: MAP · STATS · SAVE &nbsp;·&nbsp; <b>M</b> — mute<br>
       <b>TOUCH</b> — left stick to move / drive · <b>ATK</b> punch / shoot ·
       <b>ACT</b> enter car · <b>RUN</b> sprint / <b>BRK</b> brake
     </div>
     <p id="save-line"></p>
+    <p class="titlefoot">KEYBOARD &amp; MOUSE · TOUCH SUPPORTED</p>
   </div>
 </div>
 
@@ -232,12 +380,41 @@
 <div id="pause" class="overlay hidden">
   <div class="panel">
     <h1 class="logo" style="font-size:44px">PAUSED</h1>
-    <p class="tagline">Palm Bay waits for no one. Press P to keep driving.</p>
-    <div class="menu">
-      <button id="btn-aim" type="button">⌖ AIM: AUTO</button>
+    <div class="tabs">
+      <button class="tabbtn" data-tab="map" type="button">🗺 MAP</button>
+      <button class="tabbtn sel" data-tab="stats" type="button">📊 STATS</button>
+      <button class="tabbtn" data-tab="settings" type="button">⚙ SETTINGS</button>
+      <button class="tabbtn" data-tab="save" type="button">💾 SAVE</button>
+    </div>
+    <div class="tabpage" id="tab-map">
+      <canvas id="bigmap" width="520" height="520"></canvas>
+      <p class="maphint">Palm Bay — districts, gang turf, your route to the objective. Police blips are live.</p>
+    </div>
+    <div class="tabpage show" id="tab-stats">
+      <div class="statsgrid">
+        <div class="ringwrap"><div class="ring" id="stats-ring"><b>0%</b></div><span>COMPLETE</span></div>
+        <div class="checklist" id="stats-checklist"></div>
+      </div>
+      <div class="medals" id="stats-medals"></div>
+      <div class="career" id="stats-career"></div>
+    </div>
+    <div class="tabpage" id="tab-settings">
+      <div class="menu">
+        <button id="btn-aim" type="button">⌖ AIM: AUTO</button>
+        <button id="btn-mute" class="ghost" type="button">🔊 SOUND: ON</button>
+      </div>
+      <p class="tagline" style="font-size:13px">AUTO locks onto targets near the crosshair (1 m assist). MANUAL shoots exactly where you aim.</p>
+    </div>
+    <div class="tabpage" id="tab-save">
+      <div class="slotcards" id="pause-slots"></div>
+      <div class="menu">
+        <button id="btn-quit" type="button">💾 SAVE &amp; QUIT TO TITLE</button>
+      </div>
+      <p class="maphint">Progress also auto-saves every 20 seconds and at every mission success.</p>
+    </div>
+    <div class="menu" style="margin-top:14px">
       <button id="btn-resume" class="ghost" type="button">▶ RESUME</button>
     </div>
-    <p class="tagline" style="font-size:13px">AUTO locks onto targets near the crosshair (1 m assist). MANUAL shoots exactly where you aim.</p>
   </div>
 </div>
 

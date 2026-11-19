@@ -371,17 +371,30 @@ export class Combat {
 }
 
 // simple player health model
+// v8: body armour — a second pool (0..100) that absorbs 60% of
+// incoming damage until it is spent. Granted by the armour pickup;
+// default 0, so every pre-v8 behaviour is unchanged without it.
 export class Health {
   constructor(max = CFG.playerHealth) {
     this.max = max;
     this.hp = max;
+    this.armour = 0;
+    this.armourMax = 100;
   }
   damage(n) {
     if (!Number.isFinite(n)) return this.hp <= 0;   // v8: NaN guard at the boundary
-    this.hp = clamp(this.hp - n, 0, this.max);
+    let rest = n;
+    if (this.armour > 0 && n > 0) {
+      const absorbed = Math.min(this.armour, n * 0.6);
+      this.armour -= absorbed;
+      rest = n - absorbed;
+    }
+    this.hp = clamp(this.hp - rest, 0, this.max);
     return this.hp <= 0;
   }
   heal(n) { if (Number.isFinite(n)) this.hp = clamp(this.hp + n, 0, this.max); }
+  addArmour(n) { if (Number.isFinite(n)) this.armour = clamp(this.armour + n, 0, this.armourMax); }
   get dead() { return this.hp <= 0; }
   get pct() { return this.hp / this.max; }
+  get armourPct() { return this.armour / this.armourMax; }
 }

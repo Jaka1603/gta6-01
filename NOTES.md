@@ -1,4 +1,40 @@
 
+## v8 — PALMBAY HEAT, pelajaran top 1 "Karimbu" + audit ulang dari nol (19 Nov malam)
+
+Perintah Jaka: pelajari game top 1 kompetisi (LEARNINGS.md — penilaian pairwise berbasis screenshot, jadi 4 screenshot dossier ADALAH permainannya), terapkan pelajarannya, audit ulang dari nol, perbaiki SEMUA bug. Tanpa push, tanpa submit — commit lokal saja.
+
+**Bug ditemukan di audit segar (tidak percaya begitu saja pada audit v7):**
+1. **WEAPONS[w].label undefined** — combat.js memakai field `name`, tapi reload + toast pickup di main.js membaca `.label` → HUD menampilkan "undefined · 12 peluru" setiap reload dan setiap ambil senjata. DIPERBAIKI (2 tempat → `.name`).
+2. **Heat luruh dengan laju penuh saat dikejar** — misi HEAT ESCAPE selesai sendiri karena decay 1,2/dtk jalan terus walau unit menempel. DIPERBAIKI: decay sadar jarak unit terdekat (1,6/dtk bila > 35 m, 0,5/dtk bila dekat).
+3. **writeSave saat misi selesai menyimpan indeks misi SEBELUM rantai maju** (next() baru jalan 1.800 ms kemudian) → CONTINUE mengulang misi yang baru saja selesai. DIPERBAIKI: save ditulis sesudah `missions.next()`.
+4. **Tombol SAVE & QUIT di layar judul menyimpan ke kehampaan** — toast-nya tertutup layar judul sendiri. DIPERBAIKI secara desain: tombol pindah ke tab SAVE di pause.
+5. **Tagline judul basi** ("v6 — ..."). Diganti baris v8.
+6. **startGame(fromSave) selalu memasang fists** — senjata terakhir yang dipegang hilang saat CONTINUE. DIPERBAIKI: pulihkan `weapons.weapon` tersimpan bila dimiliki.
+7. **Kolom judul meluap di jendela 720p** (panel 796px > 720px, logo terpotong di tepi atas — terukur via probe geometri). DIPERBAIKI: media query max-height 760px merampingkan panel → 705px, logo utuh.
+8. Catatan non-blocking (tidak diubah): Traffic.update mengalokasi Vector3 per mobil per frame (GC churn); kamera collideBuildings kadang melawan spring; batas wrap lalu lintas ±215 vs clamp pemain ±244.
+
+**Fitur top 1 yang diterapkan (petakan ke LEARNINGS.md §A–E):**
+- HUD bernama penuh: kartu misi (nomor+judul, pil STAGE x/y, objektif tahap, penghitung seperti TABRAKAN 2/3, teaser NEXT:), panel respons polisi (unit BERNAMA CORAL-48/MARLIN-3/DORADO-2/PELICAN-9 + KITE-1, peran RAMMING/FLANKING/PURSUIT/FOOT PURSUIT/AIR UNIT, jarak meter per unit, status "AIR UNIT DEPLOYED"/"UNITS RESPONDING"), jam dunia + uang + bintang, bar RANK + RP (WHEELMAN→LEGEND), baris 6 slot senjata berikon + amunisi, kartu kru (MIRA KESANG Driver Z "SWAP PLATES" heat −45; LIO Mechanic X "QUICK FIX" +45 HP mobil; KIKI Lookout V "EYES OUT" bust=0 + decay ×3 20 dtk — semua berfungsi betulan, ada cooldown, bisa diklik/tap), nama distrik besar + standing + bar, bar HEALTH/ARMOUR dengan angka, bar target kendaraan (AZURE SEDAN GT + % kondisi), baris radio (OMBO 98.4/PALM 101.1/KORA 87.7 bergilir).
+- Misi ber-tahap: 7 misi kini multi-stage (3 tahap mayoritas; follow 4 checkpoint, chase 3 tahap tabrakan, escape 3 pita heat, delivery sadar-kendaraan) dengan event 'stage' + toast transisi; pemicu penyelesaian akhir TIDAK berubah.
+- Judul: logo gradien besar di atas vista kota senja, CONTINUE/NEW GAME/SETTINGS (baris setelan inline), 3 kartu slot save. Pause 4 tab: MAP (peta kota penuh di canvas: distrik bernama, rute, blip polisi + heli, panah pemain), STATS (cincin % complete, checklist progres, medali misi G/S/B, statistik karier: mobil dicuri, lolos, jarak, top speed, cash earned, busted/wasted), SETTINGS, SAVE (slot + SAVE & QUIT).
+- Save 3 slot di localStorage; slot 1 memakai kunci legacy `palmbay-heat-save-v1` persis (save lama + suite lama tetap jalan); payload diperluas (RP, standing, medali, statistik, armour, distrik dikunjungi).
+- Polisi: helikopter KITE-1 betulan — deploy wanted ≥ 4, pensiun ≤ 2, mengorbit pemain r=17 m di y=26, rotor berputar, kerucut searchlight + cakram cahaya mengikuti pemain; callsign per mobil; peran dihitung dari perilaku.
+- Armour: pool 0–100 menyerap 60% damage; pickup rompi di pelabuhan + belakang beach bar.
+- Siklus siang–malam penuh mengikuti jam dunia (siang s.d. 18:45, senja, malam ungu 20:15–05:30, fajar): matahari/bulan, kabut = warna horizon, lampu jalan makin berpendar, jendela facade makin menyala. Tampilan golden-hour 18:30 bawaan tidak berubah.
+- Dunia: 8 papan nama bisnis neon baru (HOTEL SERIWA, LAGUNA SUITES, FIBA PALACE, MALUN HOTEL, CLUB NEON, TACO SOL, LIQUOR 24H, PORTSIDE INN) + ±19 payung pantai warna-warni (instanced, 3 draw call) — kepadatan tanpa menaikkan jumlah ped/mobil (anggaran draw call mobile aman).
+- Distrik dinamai ulang ala top 1: BEACHFRONT, DOWNTOWN, THE PALMS, HARBOR, OLD TOWN, MIDTOWN, GANG TURF — PALM BAY GREENS; standing per distrik naik saat misi selesai di sana, turun saat bintang naik di sana.
+
+**Hasil tes (lingkungan SwiftShader cell bersama — sangat lambat, 1 dtk sim bisa 20–40 dtk nyata):**
+- Suite v8 BARU (`playtest-gta6-v8.mjs`, 49 cek: kartu misi/stage, panel polisi bernama, heli orbit+pensiun, slot senjata, 3 kemampuan kru, RP+medali+standing, urutan save, tab pause MAP/STATS/SAVE, siang–malam, armour, statistik lolos, draw call, nol error): **49/49** (dijalankan dua kali, termasuk sesudah edit screenshot terakhir).
+- v7: **33/33** · v6: **50/50** (draw calls mobile 509 ≤ 700, desktop 329 ≤ 1000) · v3: **39/39** · v4: **19/19** · mobile: **20/20** — semua sama/lebih baik dari baseline v7.
+- v5: **57/60**. Rincian jujur: (a) 1 gagal = assert brake-exit basi yang sama persis dengan baseline v7 59/60 (perilaku terbukti benar via probe-v7-brakeexit — jangan ubah logika game untuknya); (b) 2 gagal (tabrak pejalan kaki oleh mobil pemain + wanted naik) = timeout real-time 40 dtk milik suite di cell lambat — direplikasi persis oleh `probe-v8-pedhit.mjs` dengan waktu longgar: **knockdown terjadi, wanted naik 1, mobil kehilangan kecepatan** — bukan regresi.
+- Suite v1 (`playtest-gta6.mjs`, di luar set terawat): gagal 3 cek + crash klik CONTINUE — suite ini basi sejak v6 (teleport hardcoded ke target dermaga lama (−180,60); target misi 1 sejak v6 di pintu beach bar (−228,5,60)). Sistem save sendiri terbukti oleh v3 ('save written' + 'continue restores cash' LULUS) dan v8. Tidak diubah — dicatat apa adanya.
+- Insiden lingkungan: dua run v3 pertama tabrakan (duplikasi wrapper exec menjalankan dua instance Chrome bersamaan) → crash 'missions is not defined' semu; run tunggal bersih = 39/39.
+
+**Screenshot dossier (masing-masing ≤ 256 KiB, JPG):** `1-cover.jpg` (180 KB — kejar-kejaran siang, heli + searchlight, HUD penuh), `2-night.jpg` (138 KB — malam jalan kaki, rompi + pistol), `3-stats.jpg` (165 KB — pause tab STATS), `4-title.jpg` (151 KB — judul + kartu slot). `shots.json` diperbarui ke 4 mode `?shot=v8chase/v8night/v8stats/v8title`; 10 jpg lama dihapus. Mode shot lama tidak diubah (satu edit kamera 'foot' yang salah sasaran sempat masuk, langsung dikembalikan persis).
+
+**Sisa kekurangan yang jujur:** (1) status line "AIR UNIT DEPLOYED" di kanan atas agak pudar di atas langit siang terang (tetap terbaca di panel polisi); (2) sprite glow lampu terlihat besar bila kamera sangat dekat lampu (shot malam); (3) panel pause tembus pandang di atas kota yang ramai — teks tetap terbaca; (4) Traffic.update masih mengalokasi objek per frame (catatan audit #8); (5) re-run suite v5 penuh tidak diulang sesudah probe — bukti probe + sisa suite hijau dianggap cukup; (6) belum ada play-test manusia untuk v8, dan rekaman bersih untuk submit tetap pekerjaan terpisah (batas lomba 24 Nov 22:00 WIB).
+
 ## v7 — PALMBAY HEAT, putaran feedback Jaka 18 Nov malam (audit total + polisi duduk di mobil + dermaga + timer + kontrol)
 
 Jaka main v6 sendiri dan lapor: (1) bug masih BANYAK, cek ulang SEMUANYA; (2) polisi muncul di SAMPING mobil polisi yang sedang melaju, harusnya duduk DI DALAM; (3) area DERMAGA banyak bug, tidak bisa dimasuki (kelas bug yang sama seperti pantai dulu); (4) alur kerja: tes sendiri → daftar semua bug → perbaiki SEMUA di putaran yang sama; (5) durasi misi terlalu pendek, laporan "mission failed" muncul terlalu cepat; (6) aksi lebih realistis; (7) kontrol masih susah, gerakan tidak presisi.

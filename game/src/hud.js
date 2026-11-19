@@ -9,6 +9,17 @@
 import { CFG, clamp } from './config.js';
 import { roadCoord, worldInfo } from './world.js';
 
+// v8 weapon slot row (top-1 style): fixed order, icon + short tag;
+// ammo renders under the ACTIVE slot only.
+const SLOT_DEFS = [
+  { id: 'fists', icon: '👊', tag: 'FISTS' },
+  { id: 'pistol', icon: '🔫', tag: '.38' },
+  { id: 'heavy', icon: '🔫', tag: 'HVY' },
+  { id: 'smg', icon: '🔫', tag: 'SMG' },
+  { id: 'shotgun', icon: '🔫', tag: '12G' },
+  { id: 'rifle', icon: '🔫', tag: 'AR-9' },
+];
+
 export class HUD {
   constructor(root) {
     this.root = root;
@@ -72,6 +83,227 @@ export class HUD {
     mk('hud-money', 'hud moneypop', '');
     mk('hud-toast', 'hud toast', '');
     this.buildDialogue();
+    this.buildV8Panels(mk);
+  }
+  // ---- v8 rich named HUD (top-1 lessons A) ------------------------
+  // Police response panel, weapon slot row, crew ability cards,
+  // rank bar, wanted status line, district block, radio line and
+  // the chase target bar. Built once; refreshed at HUD rate.
+  buildV8Panels(mk) {
+    const panel = mk('hud-police', 'hud policepanel', '');
+    panel.style.display = 'none';
+    const slots = mk('hud-weapons', 'hud weaponslots', '');
+    this.slotEls = SLOT_DEFS.map((s) => {
+      const d = document.createElement('div');
+      d.className = 'wslot locked';
+      d.innerHTML = '<i>' + s.icon + '</i><b>' + s.tag + '</b><span></span>';
+      slots.appendChild(d);
+      return { root: d, ammo: d.querySelector('span'), id: s.id };
+    });
+    const crew = mk('hud-crew', 'hud crewcards', '');
+    this.crewEls = [];
+    for (let i = 0; i < 3; i++) {
+      const d = document.createElement('div');
+      d.className = 'crewcard';
+      d.innerHTML = '<b></b><span class="crole"></span><span class="ccd"></span>';
+      crew.appendChild(d);
+      this.crewEls.push({
+        root: d, name: d.querySelector('b'),
+        role: d.querySelector('.crole'), cd: d.querySelector('.ccd'),
+      });
+    }
+    mk('hud-rank', 'hud rank', '');
+    const status = mk('hud-status', 'hud statusline', '');
+    status.style.display = 'none';
+    mk('hud-district', 'hud district', '');
+    const radio = mk('hud-radio', 'hud radio', '');
+    radio.style.display = 'none';
+    const target = mk('hud-target', 'hud targetbar', '');
+    target.style.display = 'none';
+  }
+  // the mission card: number + title, STAGE pill, stage objective,
+  // objective counter and the NEXT teaser — replaces the plain
+  // objective line while a mission runs (same element, so layout
+  // and the touch overlap checks keep their geometry).
+  setMissionCard(m) {
+    const el = this.el['hud-objective'];
+    if (!m) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.style.display = 'block';
+    el.innerHTML =
+      '<div class="mc-head"><b>MISSION ' + m.num + ' · ' + m.name + '</b>' +
+      '<span class="mc-stage">STAGE ' + m.stage + '/' + m.stageCount + '</span></div>' +
+      '<div class="mc-obj">' + m.stageText +
+      (m.counter ? ' &nbsp;<span class="mc-count">' + m.counter + '</span>' : '') + '</div>' +
+      '<div class="mc-next">NEXT: ' + m.next + '</div>';
+  }
+  setPolicePanel(units, statusText) {
+    const el = this.el['hud-police'];
+    if (!units || !units.length) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    let h = '<div class="pp-head">🚨 POLICE RESPONSE · ' + units.length + ' UNIT' +
+      (units.length > 1 ? 'S' : '') + '</div>';
+    for (const u of units) {
+      h += '<div class="pp-row"><b>' + u.name + '</b><span class="pp-role">' + u.role +
+        '</span><span class="pp-dist">' + Math.round(u.dist) + ' m</span></div>';
+    }
+    if (statusText) h += '<div class="pp-status">' + statusText + '</div>';
+    el.innerHTML = h;
+  }
+  setStatus(text) {
+    const el = this.el['hud-status'];
+    if (text) { el.textContent = text; el.style.display = 'block'; }
+    else el.style.display = 'none';
+  }
+  setRank(rank, rankName, rp, pct) {
+    this.el['hud-rank'].innerHTML =
+      '<div class="rk-head"><b>RANK ' + rank + ' · ' + rankName + '</b><span>' +
+      Math.floor(rp).toLocaleString('en-US') + ' RP</span></div>' +
+      '<div class="rk-bar"><div class="rk-fill" style="width:' +
+      Math.round(clamp(pct, 0, 1) * 100) + '%"></div></div>';
+  }
+  setWeaponSlots(active, owned, mags, reserves) {
+    for (const s of this.slotEls) {
+      const has = owned.has(s.id);
+      s.root.classList.toggle('locked', !has);
+      s.root.classList.toggle('active', has && s.id === active);
+      s.ammo.textContent = !has ? '—'
+        : s.id === 'fists' ? '∞'
+        : (mags[s.id] + '/' + reserves[s.id]);
+    }
+  }
+  setCrew(cards) {
+    cards.forEach((c, i) => {
+      const e = this.crewEls[i];
+      if (!e) return;
+      e.name.textContent = c.ability + ' — ' + c.name;
+      e.role.textContent = c.role;
+      e.cd.textContent = c.cdLeft > 0
+        ? '⏳ ' + Math.ceil(c.cdLeft) + 's'
+        : '▶ ' + c.key + ' READY';
+      e.root.classList.toggle('ready', c.cdLeft <= 0);
+      e.root.classList.toggle('cooling', c.cdLeft > 0);
+    });
+  }
+  setDistrict(name, standing, label) {
+    this.el['hud-district'].innerHTML =
+      '<div class="dz-name">' + name + '</div>' +
+      '<div class="dz-row"><span>' + label + ' · ' + Math.round(standing) + '</span>' +
+      '<div class="dz-bar"><div class="dz-fill" style="width:' +
+      Math.round(clamp(standing, 0, 100)) + '%"></div></div></div>';
+  }
+  setRadio(text) {
+    const el = this.el['hud-radio'];
+    if (text) { el.textContent = '📻 ' + text; el.style.display = 'block'; }
+    else el.style.display = 'none';
+  }
+  setTargetBar(name, pct) {
+    const el = this.el['hud-target'];
+    if (!name) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = '<b>🎯 ' + name + '</b><div class="tg-bar"><div class="tg-fill" style="width:' +
+      Math.round(clamp(pct, 0, 1) * 100) + '%"></div></div>' +
+      '<span>' + Math.round(clamp(pct, 0, 1) * 100) + '% — ' +
+      (pct > 0.66 ? 'PRISTINE' : pct > 0.33 ? 'DENTED' : 'WRECKED') + '</span>';
+  }
+  // ---- v8 pause MAP tab: the whole city on one canvas -----------
+  // Same layout data as the minimap, drawn big with district names,
+  // the gang turf, a route line to the objective and unit blips.
+  drawBigMap(canvas, view) {
+    const ctx = canvas.getContext('2d');
+    const S = canvas.width, HALF = 210, scale = S / (HALF * 2 + 90);
+    const toMap = (x, z) => [S / 2 + x * scale, S / 2 + z * scale];
+    ctx.clearRect(0, 0, S, S);
+    ctx.fillStyle = '#16202e';
+    ctx.fillRect(0, 0, S, S);
+    const [seaEdge] = toMap(-245, 0);
+    const [sandW] = toMap(-250, 0);
+    const [sandE] = toMap(-210, 0);
+    ctx.fillStyle = '#2a6a8a';
+    ctx.fillRect(0, 0, Math.max(0, seaEdge), S);
+    ctx.fillStyle = '#e8c890';
+    ctx.fillRect(Math.max(0, sandW), 0, sandE - Math.max(0, sandW), S);
+    const gt = worldInfo.gangTurf;
+    if (gt) {
+      const [x0, y0] = toMap(gt.x0, gt.z0);
+      const [x1, y1] = toMap(gt.x1, gt.z1);
+      ctx.fillStyle = 'rgba(46,158,74,0.4)';
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+    ctx.fillStyle = '#4a5568';
+    for (const b of worldInfo.blocks) {
+      const [x0, y0] = toMap(b.x0, b.z0);
+      const [x1, y1] = toMap(b.x1, b.z1);
+      ctx.fillRect(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2);
+    }
+    ctx.strokeStyle = '#232830';
+    ctx.lineWidth = 6;
+    for (let i = 0; i <= CFG.gridN; i++) {
+      const c = roadCoord(i);
+      const [x] = toMap(c, 0);
+      const [, y] = toMap(0, c);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, S); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(S, y); ctx.stroke();
+    }
+    // pier
+    const [px0, py0] = toMap(-300, 56);
+    const [px1, py1] = toMap(-240, 64);
+    ctx.fillStyle = '#8a6a4a';
+    ctx.fillRect(px0, py0, px1 - px0, py1 - py0);
+    // district labels (the same names the HUD splash uses)
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.font = 'bold 15px Trebuchet MS, sans-serif';
+    ctx.textAlign = 'center';
+    const label = (x, z, t) => { const [lx, ly] = toMap(x, z); ctx.fillText(t, lx, ly); };
+    label(-185, 0, 'BEACHFRONT');
+    label(0, 0, 'DOWNTOWN');
+    label(0, -150, 'THE PALMS');
+    label(150, 150, 'HARBOR');
+    label(150, -60, 'OLD TOWN');
+    label(-60, 150, 'MIDTOWN');
+    label(150, -150, 'GANG TURF');
+    // route line to the objective
+    if (view.target) {
+      const [tx, ty] = toMap(view.target[0], view.target[1]);
+      const [ux, uy] = toMap(view.player.x, view.player.z);
+      ctx.strokeStyle = '#ffd23f';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([8, 6]);
+      ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(tx, ty); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#ffd23f';
+      ctx.beginPath(); ctx.arc(tx, ty, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(tx, ty, 12, 0, Math.PI * 2); ctx.stroke();
+    }
+    // police blips
+    for (const c of view.police || []) {
+      const [cx, cy] = toMap(c.x, c.z);
+      ctx.fillStyle = '#ff4040';
+      ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
+    }
+    if (view.heli) {
+      const [hx, hy] = toMap(view.heli.x, view.heli.z);
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(hx, hy, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#16202e';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.fillText('H', hx, hy + 3);
+    }
+    // player arrow (same π − heading convention as the minimap)
+    const [ux, uy] = toMap(view.player.x, view.player.z);
+    ctx.save();
+    ctx.translate(ux, uy);
+    ctx.rotate(Math.PI - view.player.heading);
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(-7, 8); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+    // north marker
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = 'bold 18px Trebuchet MS, sans-serif';
+    ctx.fillText('N ▲', S - 30, 26);
   }
   // Mama Rosa's portrait dialogue card: canvas portrait (painted
   // once), name, line, NEXT / SKIP buttons. The world keeps idling
@@ -199,11 +431,15 @@ export class HUD {
       el.style.display = 'block';
     } else el.style.display = 'none';
   }
-  setHealth(pct) {
+  setHealth(pct, armourPct = 0, hpNum = null, armourNum = 0) {
     const w = Math.round(clamp(pct, 0, 1) * 100);
+    const a = Math.round(clamp(armourPct, 0, 1) * 100);
+    // v8: HEALTH and ARMOUR bars, both with numbers (top-1 style)
     this.el['hud-health'].innerHTML =
-      '<div class="bar"><div class="fill" style="width:' + w + '%"></div></div>' +
-      '<span>❤ ' + w + '</span>';
+      '<div class="hcol">' +
+      '<div class="hrow"><em>HP</em><div class="bar"><div class="fill" style="width:' + w + '%"></div></div><span>' + (hpNum === null ? w : Math.ceil(hpNum)) + '</span></div>' +
+      '<div class="hrow"><em>AR</em><div class="bar armour"><div class="fill" style="width:' + a + '%"></div></div><span>' + Math.ceil(armourNum) + '</span></div>' +
+      '</div>';
   }
   setStars(n) {
     let s = '';
@@ -284,7 +520,9 @@ export class HUD {
     } else this.el['hud-timer'].style.display = 'none';
   }
   setSpeed(kmh) {
-    this.el['hud-speed'].textContent = kmh > 1 ? Math.round(kmh) + ' km/h' : '';
+    // v8: big-number speedometer (top-1 style)
+    this.el['hud-speed'].innerHTML = kmh > 1
+      ? Math.round(kmh) + ' <small>KM/H</small>' : '';
   }
   setBust(pct) {
     const el = this.el['hud-bust'];
@@ -361,7 +599,7 @@ export class HUD {
           ctx.fillRect(kx - 1.5, ky - 4.5, 3, 9);
           ctx.fillRect(kx - 4.5, ky - 1.5, 9, 3);
         } else {
-          ctx.fillStyle = '#59e6ff';
+          ctx.fillStyle = pk.kind === 'armour' ? '#59a7ff' : '#59e6ff';
           ctx.save();
           ctx.translate(kx, ky);
           ctx.rotate(Math.PI / 4);

@@ -57,6 +57,7 @@ const scene = new THREE.Scene();
 // The horizon colour MUST equal the fog colour — that melts the city
 // into the sky instead of cutting it off.
 const SUN_DIR = new THREE.Vector3(-0.75, 0.28, 0.30).normalize();
+let skyU = null;   // v8: sky shader uniforms, driven by the day/night cycle
 {
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, fog: false,
@@ -92,6 +93,7 @@ const SUN_DIR = new THREE.Vector3(-0.75, 0.28, 0.30).normalize();
   var sky = new THREE.Mesh(new THREE.SphereGeometry(900, 32, 15), skyMat);
   sky.frustumCulled = false;
   scene.add(sky);
+  skyU = skyMat.uniforms;
 }
 scene.fog = new THREE.Fog(CFG.fog, CFG.fogNear, CFG.fogFar);
 
@@ -115,6 +117,59 @@ sun.shadow.normalBias = 0.03;
 scene.add(sun, sun.target);
 scene.add(new THREE.HemisphereLight(CFG.hemiSky, CFG.hemiGround, CFG.hemiIntensity));
 const _sv = new THREE.Vector3();
+const _lastPos = new THREE.Vector3(null, 0, 0);   // v8 distance stat
+// ---- v8 day/night cycle ------------------------------------------
+// The world clock was decorative in v7 (18:30 forever, sun fixed).
+// Now the light follows it: full day until 18:45, dusk to 20:15,
+// night (purple sky, moonlight, lamps + windows lit) until 05:30,
+// dawn back to day. The shipped golden-hour look is the 18:30
+// default, untouched. Fog always equals the horizon colour.
+const DN_DAY = {
+  top: new THREE.Color(PALETTE.skyTop), mid: new THREE.Color(PALETTE.skyMid),
+  hor: new THREE.Color(PALETTE.horizon), fog: new THREE.Color(PALETTE.fog),
+  sun: 3.0, sunC: new THREE.Color(PALETTE.sunLight), hemi: CFG.hemiIntensity, exp: CFG.exposure,
+};
+const DN_NIGHT = {
+  top: new THREE.Color(0x0b1026), mid: new THREE.Color(0x2a1e4a),
+  hor: new THREE.Color(0x4a2c50), fog: new THREE.Color(0x35224a),
+  sun: 0.55, sunC: new THREE.Color(0x8fb8ff), hemi: 0.34, exp: 1.02,
+};
+const _dnC = new THREE.Color();
+let _dnApplied = -1;
+let lampGlowMat = null;
+function dayFactor() {
+  const m = ((state.clockMin % 1440) + 1440) % 1440;
+  if (m >= 420 && m < 1125) return 1;                    // 07:00–18:45 day
+  if (m >= 1125 && m < 1215) return 1 - (m - 1125) / 90; // dusk → night
+  if (m >= 330 && m < 420) return (m - 330) / 90;        // dawn → day
+  return 0;                                              // night
+}
+function updateDayNight() {
+  const f = dayFactor();
+  if (Math.abs(f - _dnApplied) < 0.004) return;   // nothing moved
+  _dnApplied = f;
+  if (!lampGlowMat) {
+    cityGroup.traverse((o) => { if (o.isPoints && !lampGlowMat) lampGlowMat = o.material; });
+  }
+  if (skyU) {
+    skyU.topColor.value.lerpColors(DN_NIGHT.top, DN_DAY.top, f);
+    skyU.midColor.value.lerpColors(DN_NIGHT.mid, DN_DAY.mid, f);
+    skyU.horizonColor.value.lerpColors(DN_NIGHT.hor, DN_DAY.hor, f);
+  }
+  scene.fog.color.lerpColors(DN_NIGHT.fog, DN_DAY.fog, f);
+  sun.intensity = DN_NIGHT.sun + (DN_DAY.sun - DN_NIGHT.sun) * f;
+  sun.color.lerpColors(DN_NIGHT.sunC, DN_DAY.sunC, f);
+  renderer.toneMappingExposure = DN_NIGHT.exp + (DN_DAY.exp - DN_NIGHT.exp) * f;
+  for (const l of scene.children) {
+    if (l.isHemisphereLight) l.intensity = DN_NIGHT.hemi + (DN_DAY.hemi - DN_NIGHT.hemi) * f;
+  }
+  if (lampGlowMat) lampGlowMat.opacity = 0.95 - 0.45 * f;
+  // lit windows carry the night city (facade emissive maps)
+  const ei = 1.75 - 0.75 * f;
+  for (const b of buildings) {
+    if (b.material && 'emissiveIntensity' in b.material) b.material.emissiveIntensity = ei;
+  }
+}
 function updateSun(playerPos) {
   _sv.copy(playerPos).addScaledVector(SUN_DIR, 120);
   // snap to the shadow-texel grid so shadows don't shimmer while moving
@@ -260,9 +315,11 @@ function findOpenSpot(x, z) {
 function makePickup(kind, weapon, x, z) {
   const g = new THREE.Group();
   const isHealth = kind === 'health';
+  const isArmour = kind === 'armour';
+  const ringColor = isHealth ? 0x3dff7a : isArmour ? 0x59a7ff : 0x59e6ff;
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(0.85, 0.07, 8, 24),
-    new THREE.MeshBasicMaterial({ color: isHealth ? 0x3dff7a : 0x59e6ff })
+    new THREE.MeshBasicMaterial({ color: ringColor })
   );
   ring.rotation.x = Math.PI / 2;
   ring.position.y = 0.25;
@@ -274,13 +331,23 @@ function makePickup(kind, weapon, x, z) {
     const v = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.66, 0.22), cm);
     const h = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.22, 0.22), cm);
     icon.add(v, h);
+  } else if (isArmour) {
+    // a little blue vest: torso block + shoulder straps
+    icon = new THREE.Group();
+    const vm = new THREE.MeshStandardMaterial({ color: 0x2050a0, roughness: 0.6 });
+    const vest = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.78, 0.3), vm);
+    const strapM = new THREE.MeshBasicMaterial({ color: 0x7dd8ff });
+    const s1 = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.3, 0.32), strapM);
+    s1.position.set(-0.18, 0.5, 0);
+    const s2 = s1.clone(); s2.position.x = 0.18;
+    icon.add(vest, s1, s2);
   } else {
     icon = makeWeaponMesh(weapon);
     icon.scale.setScalar(1.6);
   }
   icon.position.y = 0.95;
   g.add(icon);
-  const glow = glowSprite(isHealth ? 0x3dff7a : 0x59e6ff, 2.4, 0.5);
+  const glow = glowSprite(ringColor, 2.4, 0.5);
   glow.position.y = 0.9;
   g.add(glow);
   g.position.set(x, 0, z);
@@ -304,10 +371,58 @@ function makePickup(kind, weapon, x, z) {
   const hB = findOpenSpot(150, 150); makePickup('health', null, hB.x, hB.z);
   const hC = findOpenSpot(-30, -157); makePickup('health', null, hC.x, hC.z);
   makePickup('health', null, 96, -20);
+  // v8: body armour — one vest by the harbor cranes, one behind
+  // the beach bar; the HUD's ARMOUR bar fills from these
+  const aA = findOpenSpot(196, -60); makePickup('armour', null, aA.x, aA.z);
+  makePickup('armour', null, -243, 20);
 }
 
 // ---------- HUD ----------
 const hud = new HUD(document.getElementById('hud'));
+
+// ================= v8 progression systems ==========================
+// RANK / RP (top-1 lesson: progression must be VISIBLE). RP comes
+// from mission completions; ranks are thresholds with names.
+const RANKS = [
+  { rp: 0, name: 'WHEELMAN' }, { rp: 600, name: 'RUNNER' },
+  { rp: 1500, name: 'FIXER' }, { rp: 3000, name: 'SHOT CALLER' },
+  { rp: 5000, name: 'KINGPIN' }, { rp: 8000, name: 'LEGEND' },
+];
+function rankOf(rp) {
+  let i = 0;
+  while (i + 1 < RANKS.length && rp >= RANKS[i + 1].rp) i++;
+  const next = RANKS[i + 1] || null;
+  const pct = next ? (rp - RANKS[i].rp) / (next.rp - RANKS[i].rp) : 1;
+  return { rank: i + 1, name: RANKS[i].name, pct };
+}
+// CREW (top-1 lesson): three named specialists with real gameplay
+// abilities on cooldowns — Mira shakes heat (plates), Lio repairs
+// the ride, Kiki breaks the bust + speeds the cooldown of heat.
+const CREW = [
+  { id: 'mira', name: 'MIRA KESANG', ability: 'SWAP PLATES', role: 'Driver', key: 'Z', cdMax: 90 },
+  { id: 'lio', name: 'LIO', ability: 'QUICK FIX', role: 'Mechanic', key: 'X', cdMax: 120 },
+  { id: 'kiki', name: 'KIKI', ability: 'EYES OUT', role: 'Lookout', key: 'V', cdMax: 75 },
+];
+const DISTRICT_NAMES = ['BEACHFRONT', 'DOWNTOWN', 'THE PALMS', 'HARBOR', 'OLD TOWN', 'MIDTOWN', 'GANG TURF — PALM BAY GREENS'];
+function defaultStanding() {
+  const o = {};
+  for (const d of DISTRICT_NAMES) o[d] = 50;
+  return o;
+}
+function standingLabel(v) {
+  return v < 35 ? 'HOSTILE' : v < 55 ? 'NEUTRAL' : v < 75 ? 'FRIENDLY' : 'BELOVED';
+}
+function defaultStats() {
+  return {
+    carsStolen: 0, escapes: 0, distanceKm: 0, topSpeedKmh: 0,
+    busts: 0, wasteds: 0, pickupsFound: 0, cashEarned: 0,
+  };
+}
+const RADIO_STATIONS = [
+  { freq: 'OMBO 98.4', genre: 'Island Pop' },
+  { freq: 'PALM 101.1', genre: 'Sunset Rock' },
+  { freq: 'KORA 87.7', genre: 'Night Drive' },
+];
 
 // ---------- game state ----------
 const state = {
@@ -353,14 +468,42 @@ const state = {
   // shapes them ONCE per frame into these axes and the sim only
   // ever reads this object (stable shape, no per-frame allocation)
   input: { ax: 0, ay: 0, mag: 0, stick: false, run: false, brake: false },
+  // v8 progression state
+  rankRp: 0,
+  standing: defaultStanding(),
+  medals: {},                 // mission id -> 'G' | 'S' | 'B'
+  stats: defaultStats(),
+  districtsVisited: [],
+  crew: { mira: 0, lio: 0, kiki: 0 },   // ability cooldowns (s left)
+  eyesOutT: 0,                // Kiki's heat-decay boost window
+  prevWanted: 0,
+  missionHpStart: CFG.playerHealth,
+  activeSlot: 1,
 };
 let saveData = loadSave();
 
-function loadSave() {
+// v8: THREE save slots (top-1 title screen). Slot 1 keeps the
+// legacy key so every older save — and every older play-test —
+// keeps working byte-for-byte; slots 2/3 get suffixed keys. The
+// active-slot pointer is its own tiny key.
+const SLOT_POINTER_KEY = 'palmbay-heat-activeslot';
+function slotKey(n) { return n === 1 ? SAVE_KEY : SAVE_KEY + '-' + n; }
+function loadSlot(n) {
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(slotKey(n));
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
+}
+function loadSave() {
+  let n = 1;
+  try { n = parseInt(localStorage.getItem(SLOT_POINTER_KEY) || '1', 10) || 1; } catch {}
+  state.activeSlot = Math.min(3, Math.max(1, n));
+  return loadSlot(state.activeSlot);
+}
+function setActiveSlot(n) {
+  state.activeSlot = Math.min(3, Math.max(1, n));
+  try { localStorage.setItem(SLOT_POINTER_KEY, String(state.activeSlot)); } catch {}
+  saveData = loadSlot(state.activeSlot);
 }
 function writeSave() {
   const data = {
@@ -374,9 +517,17 @@ function writeSave() {
       reserves: combat.reserves, aimMode: combat.aimMode,
       weapon: combat.weapon,
     },
+    // v8: progression persists — rank, standing, medals, career
+    rankRp: state.rankRp,
+    standing: state.standing,
+    medals: state.medals,
+    stats: state.stats,
+    districtsVisited: state.districtsVisited,
+    armour: health.armour,
+    slot: state.activeSlot,
     when: Date.now(),
   };
-  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch {}
+  try { localStorage.setItem(slotKey(state.activeSlot), JSON.stringify(data)); } catch {}
   saveData = data;
 }
 
@@ -560,6 +711,31 @@ document.getElementById('btn-aim').addEventListener('click', () => toggleAimMode
 document.getElementById('btn-resume').addEventListener('click', () => togglePause());
 hud.setAimMode(combat.aimMode);
 
+// v8: save-slot cards (title + pause SAVE tab share the renderer).
+// A card shows the slot's story state at a glance; clicking one on
+// the title selects it as the active slot.
+function slotCardHTML(n, d) {
+  if (!d) return '<b>SLOT ' + n + '</b><span class="empty">— empty —</span>';
+  const pct = Math.round((d.missionsDone || 0) / MISSION_DEFS.length * 100);
+  const rk = rankOf(d.rankRp || 0);
+  return '<b>SLOT ' + n + ' · ' + pct + '%</b><span>' +
+    'Misi ' + (d.missionIndex + 1) + '/' + MISSION_DEFS.length +
+    ' · $' + Math.floor(d.cash || 0).toLocaleString('en-US') + '<br>' +
+    'Rank ' + rk.rank + ' ' + rk.name + ' · ' +
+    new Date(d.when).toLocaleDateString() + '</span>';
+}
+function renderSlotCards(container, onPick) {
+  if (!container) return;
+  container.innerHTML = '';
+  for (let n = 1; n <= 3; n++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'slotcard' + (n === state.activeSlot ? ' sel' : '');
+    b.innerHTML = slotCardHTML(n, loadSlot(n));
+    b.addEventListener('click', () => onPick(n));
+    container.appendChild(b);
+  }
+}
 function showTitle() {
   state.mode = 'title';
   document.body.classList.remove('in-game');
@@ -568,10 +744,14 @@ function showTitle() {
   endEl.classList.add('hidden');
   pauseEl.classList.add('hidden');
   titleContinue.style.display = saveData ? 'block' : 'none';
+  renderSlotCards(document.getElementById('slot-cards'), (n) => {
+    setActiveSlot(n);
+    showTitle();
+  });
   document.getElementById('save-line').textContent = saveData
-    ? 'Save: $' + saveData.cash + ' · Misi ' + (saveData.missionIndex + 1) + '/' + MISSION_DEFS.length + ' · ' +
+    ? 'Slot ' + state.activeSlot + ': $' + saveData.cash + ' · Misi ' + (saveData.missionIndex + 1) + '/' + MISSION_DEFS.length + ' · ' +
       new Date(saveData.when).toLocaleDateString()
-    : 'Belum ada save.';
+    : 'Belum ada save di slot ' + state.activeSlot + '.';
 }
 function startGame(fromSave) {
   audio.ensure();
@@ -597,6 +777,13 @@ function startGame(fromSave) {
     state.cash = saveData.cash;
     state.missionsDone = saveData.missionsDone || 0;
     health.hp = saveData.health || CFG.playerHealth;
+    // v8: restore progression
+    health.armour = saveData.armour || 0;
+    state.rankRp = saveData.rankRp || 0;
+    state.standing = Object.assign(defaultStanding(), saveData.standing || {});
+    state.medals = saveData.medals || {};
+    state.stats = Object.assign(defaultStats(), saveData.stats || {});
+    state.districtsVisited = saveData.districtsVisited || [];
     player.position.set(saveData.x || 30, 0, saveData.z || 30);
     // v6: restore the arsenal
     if (saveData.weapons) {
@@ -605,7 +792,8 @@ function startGame(fromSave) {
       Object.assign(combat.mags, w.mags || {});
       Object.assign(combat.reserves, w.reserves || {});
       combat.aimMode = w.aimMode || combat.aimMode;
-      combat.setWeapon('fists');
+      // v8 fix: restore the weapon Dario was holding, not fists
+      combat.setWeapon(w.weapon && combat.owned.has(w.weapon) ? w.weapon : 'fists');
     }
     missions.start(saveData.missionIndex || 0);
     hud.phone('MAMA ROSA', 'Selamat datang kembali, Dario. Kerjaan menunggumu.');
@@ -613,6 +801,15 @@ function startGame(fromSave) {
     state.cash = CFG.startCash;
     state.missionsDone = 0;
     health.hp = CFG.playerHealth;
+    // v8: a new game resets progression too
+    health.armour = 0;
+    state.rankRp = 0;
+    state.standing = defaultStanding();
+    state.medals = {};
+    state.stats = defaultStats();
+    state.districtsVisited = [];
+    state.crew = { mira: 0, lio: 0, kiki: 0 };
+    state.eyesOutT = 0;
     // sidewalk spawn (see build note), facing +X along the kerb,
     // camera settled behind him: W walks the pavement, not a lane
     player.position.set(40.5, 0, 38.45);
@@ -664,9 +861,33 @@ document.getElementById('btn-retry').addEventListener('click', () => {
   syncHUD();
 });
 document.getElementById('btn-title').addEventListener('click', showTitle);
+// v8: SAVE & QUIT lives in the pause SAVE tab now (on the title it
+// saved into the void — the HUD toast was hidden behind the title)
 titleQuit.addEventListener('click', () => {
   writeSave();
-  hud.center('PROGRESS DISIMPAN', 'Sampai jumpa di Palm Bay, Dario.');
+  showTitle();
+});
+// v8 title SETTINGS row: aim mode + sound, inline under the menu
+document.getElementById('btn-settings').addEventListener('click', () => {
+  document.getElementById('settings-row').classList.toggle('show');
+});
+function syncMuteButtons() {
+  const t = audio.muted ? '🔇 SOUND: OFF' : '🔊 SOUND: ON';
+  const a = document.getElementById('btn-mute-title');
+  const b = document.getElementById('btn-mute');
+  if (a) a.textContent = t;
+  if (b) b.textContent = t;
+}
+document.getElementById('btn-aim-title').addEventListener('click', () => {
+  toggleAimMode();
+  document.getElementById('btn-aim-title').textContent =
+    '⌖ AIM: ' + (combat.aimMode === 'auto' ? 'AUTO' : 'MANUAL');
+});
+document.getElementById('btn-mute-title').addEventListener('click', () => {
+  audio.ensure(); audio.toggleMute(); syncMuteButtons();
+});
+document.getElementById('btn-mute').addEventListener('click', () => {
+  audio.ensure(); audio.toggleMute(); syncMuteButtons();
 });
 
 // ---------- missions events ----------
@@ -684,6 +905,7 @@ const ROSA_POST = {
 };
 missions.onEvent = (type, payload) => {
   if (type === 'start') {
+    state.missionHpStart = health.hp;
     hud.setObjective(payload.name + ' — ' + payload.brief);
     hud.setZone(payload.zone || '');
     hud.titleCard(payload.name, 'MISI ' + (missions.index + 1) + ' / ' + MISSION_DEFS.length);
@@ -695,17 +917,45 @@ missions.onEvent = (type, payload) => {
     if (payload.escape) police.setWanted(3);
     if (payload.follow) resetCourier();
     if (payload.delivery) hud.banner('CHECKPOINT — ANTAR KE PINTU MAMA ROSA');
+  } else if (type === 'stage') {
+    // v8: stage transitions announce themselves (the follow
+    // mission already fires its CHECKPOINT banner, so it skips)
+    if (!payload.def.follow) {
+      hud.toast('STAGE ' + payload.stage + '/' + payload.stageCount + ' — ' + payload.text);
+      audio.play('chime');
+    }
   } else if (type === 'complete') {
     state.cash += payload.reward;
     state.missionsDone += 1;
+    state.stats.cashEarned += payload.reward;
+    // v8: RP + medal + district standing for the completion
+    const rpGain = 300 + Math.round(payload.reward / 2);
+    const rankBefore = rankOf(state.rankRp).rank;
+    state.rankRp += rpGain;
+    const frac = payload.time > 0 ? missions.timer / payload.time : 1;
+    const medal = (health.hp >= 85 && frac >= 0.35) ? 'G' : (health.hp >= 50 ? 'S' : 'B');
+    const medalRank = { B: 1, S: 2, G: 3 };
+    if (!state.medals[payload.id] || medalRank[medal] > medalRank[state.medals[payload.id]]) {
+      state.medals[payload.id] = medal;
+    }
+    const dz = zoneNameAt(payload.target[0], payload.target[1]);
+    state.standing[dz] = clamp((state.standing[dz] ?? 50) + 6, 0, 100);
     audio.play('cash');
     hud.titleCard('SUCCESS', payload.name);
     hud.moneyPopup(payload.reward);
-    hud.showDialogue('MAMA ROSA', ROSA_POST[payload.id] || 'Kerja bagus, Dario.');
-    writeSave();
-    hud.toast('💾 SAVED');
+    hud.showDialogue('MAMA ROSA', (ROSA_POST[payload.id] || 'Kerja bagus, Dario.') +
+      ' (+' + rpGain + ' RP · Medali ' + medal + ')');
+    if (rankOf(state.rankRp).rank > rankBefore) {
+      setTimeout(() => hud.center('RANK UP!', 'Rank ' + rankOf(state.rankRp).rank + ' · ' + rankOf(state.rankRp).name), 900);
+    }
+    // v8 bug fix: v7 saved HERE — before missions.next() advanced
+    // the index — so CONTINUE after a completion replayed the
+    // mission you had just finished. The save now lands after the
+    // chain advances (the 20 s auto-save still covers the gap).
     setTimeout(() => {
       const next = missions.next();
+      writeSave();
+      hud.toast('💾 SAVED');
       if (!next) {
         hud.titleCard('PALM BAY HEAT — TAMAT', 'Semua ' + MISSION_DEFS.length + ' misi selesai');
         hud.showDialogue('MAMA ROSA', 'Kamu legenda Palm Bay sekarang.');
@@ -749,8 +999,98 @@ function togglePause() {
     // v6: the aim toggle always shows the live mode
     const b = document.getElementById('btn-aim');
     if (b) b.textContent = '⌖ AIM: ' + (combat.aimMode === 'auto' ? 'AUTO' : 'MANUAL');
+    syncMuteButtons();
+    fillPause();
   }
   else if (state.mode === 'paused') { state.mode = 'playing'; pauseEl.classList.add('hidden'); }
+}
+// ---- v8 pause tabs: MAP / STATS / SETTINGS / SAVE ----------------
+let pauseTab = 'stats';
+function switchTab(name) {
+  pauseTab = name;
+  for (const b of document.querySelectorAll('#pause .tabbtn')) {
+    b.classList.toggle('sel', b.dataset.tab === name);
+  }
+  for (const p of document.querySelectorAll('#pause .tabpage')) {
+    p.classList.toggle('show', p.id === 'tab-' + name);
+  }
+  if (name === 'map') drawPauseMap();
+  if (name === 'stats') fillStats();
+  if (name === 'save') fillPauseSlots();
+}
+function fillPauseSlots() {
+  renderSlotCards(document.getElementById('pause-slots'), (n) => {
+    setActiveSlot(n);
+    writeSave();
+    fillPauseSlots();
+    hud.toast('💾 SAVED — SLOT ' + n);
+  });
+}
+for (const b of document.querySelectorAll('#pause .tabbtn')) {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+}
+function drawPauseMap() {
+  const cv = document.getElementById('bigmap');
+  if (!cv) return;
+  const pp = state.inCar ? car.position : player.position;
+  hud.drawBigMap(cv, {
+    player: { x: pp.x, z: pp.z, heading: state.inCar ? car.rotation.y : state.heading },
+    target: missions.active && missions.current ? missions.current.target : null,
+    police: police.cars.map((c) => ({ x: c.position.x, z: c.position.z })),
+    heli: police.heli ? { x: police.heli.position.x, z: police.heli.position.z } : null,
+  });
+}
+function completionPct() {
+  return (state.missionsDone / MISSION_DEFS.length) * 0.55 +
+    (combat.owned.size / 6) * 0.2 +
+    Math.min(1, state.stats.pickupsFound / 11) * 0.15 +
+    (state.districtsVisited.length / DISTRICT_NAMES.length) * 0.1;
+}
+function fillStats() {
+  const pct = Math.round(completionPct() * 100);
+  const ring = document.getElementById('stats-ring');
+  if (ring) {
+    ring.style.background = 'conic-gradient(#ffd23f ' + pct + '%, rgba(255,255,255,.12) ' + pct + '%)';
+    ring.querySelector('b').textContent = pct + '%';
+  }
+  const rows = [
+    ['Story missions', state.missionsDone, MISSION_DEFS.length],
+    ['Arsenal owned', combat.owned.size, 6],
+    ['Pickups found', Math.min(state.stats.pickupsFound, 11), 11],
+    ['Districts visited', state.districtsVisited.length, DISTRICT_NAMES.length],
+  ];
+  const cl = document.getElementById('stats-checklist');
+  if (cl) {
+    cl.innerHTML = rows.map((r) =>
+      '<div class="checkrow"><div class="cr-head"><span>' + r[0] + '</span><b>' +
+      r[1] + ' / ' + r[2] + '</b></div><div class="checkbar"><div style="width:' +
+      Math.round(r[1] / r[2] * 100) + '%"></div></div></div>').join('');
+  }
+  const md = document.getElementById('stats-medals');
+  if (md) {
+    md.innerHTML = 'MISSION MEDALS<br>' + MISSION_DEFS.map((d, i) => {
+      const m = state.medals[d.id];
+      return '<span class="medal ' + (m || 'none') + '">' + (m || '·') + '</span>' +
+        '<span style="margin-right:10px">M' + (i + 1) + '</span>';
+    }).join('');
+  }
+  const cr = document.getElementById('stats-career');
+  if (cr) {
+    const rk = rankOf(state.rankRp);
+    const items = [
+      ['Rank', rk.rank + ' · ' + rk.name], ['RP', Math.floor(state.rankRp).toLocaleString('en-US')],
+      ['Cars stolen', state.stats.carsStolen], ['Cops escaped', state.stats.escapes],
+      ['Distance', state.stats.distanceKm.toFixed(1) + ' km'], ['Top speed', Math.round(state.stats.topSpeedKmh) + ' km/h'],
+      ['Cash earned', '$' + Math.floor(state.stats.cashEarned).toLocaleString('en-US')],
+      ['Busted / Wasted', state.stats.busts + ' / ' + state.stats.wasteds],
+    ];
+    cr.innerHTML = items.map((it) => '<div>' + it[0] + '<b>' + it[1] + '</b></div>').join('');
+  }
+}
+function fillPause() {
+  if (pauseTab === 'map') drawPauseMap();
+  else if (pauseTab === 'stats') fillStats();
+  else if (pauseTab === 'save') fillPauseSlots();
 }
 function playerMelee() {
   if (state.mode !== 'playing' || state.inCar) return;
@@ -816,7 +1156,7 @@ function playerShoot() {
 function reloadPistol() {
   if (state.mode !== 'playing' || combat.weapon === 'fists') return;
   if (combat.reload()) {
-    hud.center('RELOAD', WEAPONS[combat.weapon].label + ' · ' + combat.mags[combat.weapon] + ' peluru');
+    hud.center('RELOAD', WEAPONS[combat.weapon].name + ' · ' + combat.mags[combat.weapon] + ' peluru');
   } else {
     hud.center('PELURU HABIS', 'Cari pickup senjata di kota!');
   }
@@ -835,6 +1175,37 @@ function cycleWeapon() {
   combat.cycleWeapon();
   syncHUD();
 }
+// ---- v8 crew abilities (Z / X / V, or tap the crew card) -------
+function useAbility(id) {
+  if (state.mode !== 'playing') return;
+  const def = CREW.find((c) => c.id === id);
+  if (!def || state.crew[id] > 0) return;
+  if (id === 'mira') {
+    if (police.wanted === 0) { hud.toast('MIRA: "Plat bersih — tidak ada heat."'); return; }
+    police.heat = Math.max(0, police.heat - 45);
+    police.updateWanted();
+    hud.phone('MIRA KESANG', 'Plat sudah kuganti. Heat-nya turun — jangan sia-siakan.');
+  } else if (id === 'lio') {
+    if (!state.inCar) { hud.toast('LIO: "Naik mobil dulu, baru kubetulkan."'); return; }
+    if (car.userData.exploded) { hud.toast('LIO: "Yang itu sudah jadi rongsokan."'); return; }
+    car.userData.hp = Math.min(car.userData.maxHp, car.userData.hp + 45);
+    hud.phone('LIO', 'Sudah kupukul-pukul sampai jalan lagi. +45 HP mobil.');
+    audio.play('chime');
+  } else if (id === 'kiki') {
+    police.bust = 0;
+    state.eyesOutT = 20;
+    hud.phone('KIKI', 'Mataku di mana-mana. 20 detik ke depan heat cepat dingin.');
+  }
+  state.crew[id] = def.cdMax;
+  syncHUD();
+}
+// touch: tapping a crew card fires the ability too
+hud.crewEls.forEach((e, i) => {
+  e.root.style.pointerEvents = 'auto';
+  e.root.style.cursor = 'pointer';
+  e.root.addEventListener('click', () => useAbility(CREW[i].id));
+});
+
 // v6 (brief E): the aim-mode toggle, shared by the pause button,
 // the C key and the save restore
 function toggleAimMode() {
@@ -858,6 +1229,10 @@ addEventListener('keydown', (e) => {
     if (w && combat.owned.has(w)) { combat.setWeapon(w); syncHUD(); }
   }
   if (e.code === 'KeyR' && state.mode === 'playing') reloadPistol();
+  // v8 crew abilities
+  if (e.code === 'KeyZ' && state.mode === 'playing') useAbility('mira');
+  if (e.code === 'KeyX' && state.mode === 'playing') useAbility('lio');
+  if (e.code === 'KeyV' && state.mode === 'playing') useAbility('kiki');
 });
 addEventListener('keyup', (e) => { state.keys[e.code] = false; });
 // v5 (fix #7): a mouse press on the canvas is a camera DRAG until
@@ -1129,6 +1504,7 @@ function doEnterSwap(tr) {
   if (c.userData.parked) {
     c.userData.parked = false;
     c.userData.stolen = true;
+    state.stats.carsStolen += 1;   // v8 career stat
     police.addWanted(1);
     hud.phone('MAMA ROSA', 'Mobil curian? Hati-hati, Dario. Polisi mengawasi.');
     peds.fleeFrom(player.position.x, player.position.z, 10);
@@ -1136,6 +1512,7 @@ function doEnterSwap(tr) {
     // carjacking: pull the car out of traffic until Dario gets out
     traffic.cars.splice(traffic.cars.indexOf(c), 1);
     c.userData.jacked = true;
+    state.stats.carsStolen += 1;   // v8 career stat
     police.addWanted(1);
     peds.fleeFrom(player.position.x, player.position.z, 10);
   }
@@ -1315,18 +1692,79 @@ function zoneNameAt(x, z) {
 }
 function syncHUD() {
   hud.setCash(state.cash);
-  hud.setHealth(health.pct);
+  hud.setHealth(health.pct, health.armourPct, health.hp, health.armour);
   hud.setStars(police.wanted);
   hud.setWeapon(combat.weapon, combat.mags[combat.weapon], combat.reserves[combat.weapon]);
   hud.setClock(state.clockMin);
   const pp = state.inCar ? car.position : player.position;
-  hud.setZone(zoneNameAt(pp.x, pp.z));
+  // v8 HUD feeds ---------------------------------------------------
+  const dzName = zoneNameAt(pp.x, pp.z);
+  hud.setDistrict(dzName, state.standing[dzName] ?? 50, standingLabel(state.standing[dzName] ?? 50));
+  const rk = rankOf(state.rankRp);
+  hud.setRank(rk.rank, rk.name, state.rankRp, rk.pct);
+  hud.setWeaponSlots(combat.weapon, combat.owned, combat.mags, combat.reserves);
+  hud.setCrew(CREW.map((c) => ({ ...c, cdLeft: state.crew[c.id] })));
+  // police response panel: named units sorted by distance, roles
+  // by behaviour — nearest rams, second flanks, an officer out of
+  // his car is a foot pursuit; the heli rides on top of the list.
+  if (police.wanted > 0) {
+    const units = police.cars.map((c) => {
+      const off = police.officers.find((o) => o.car === c);
+      let role = 'PURSUIT';
+      if (off && off.mode !== 'ride' && off.mode !== 'enter') role = 'FOOT PURSUIT';
+      c.userData.role = role;
+      return {
+        name: c.userData.callsign || 'UNIT',
+        role,
+        dist: Math.hypot(c.position.x - pp.x, c.position.z - pp.z),
+        car: c,
+      };
+    }).sort((a, b) => a.dist - b.dist);
+    units.forEach((u, i) => {
+      if (u.role === 'PURSUIT') u.role = i === 0 ? 'RAMMING' : (i === 1 ? 'FLANKING' : 'PURSUIT');
+      u.car.userData.role = u.role;
+    });
+    const list = units.map((u) => ({ name: u.name, role: u.role, dist: u.dist }));
+    if (police.heli) {
+      list.unshift({
+        name: 'KITE-1', role: 'AIR UNIT',
+        dist: police.heli.position.distanceTo(pp),
+      });
+    }
+    const status = police.heli ? 'AIR UNIT DEPLOYED' : 'UNITS RESPONDING';
+    hud.setPolicePanel(list, status);
+    hud.setStatus(police.heli ? 'AIR UNIT DEPLOYED' : (police.wanted >= 3 ? 'UNITS RESPONDING' : ''));
+  } else {
+    hud.setPolicePanel(null);
+    hud.setStatus('');
+  }
+  // radio: the station rotates every ~50 s of sim time
+  const st = RADIO_STATIONS[Math.floor(state.time / 50) % RADIO_STATIONS.length];
+  hud.setRadio(st.freq + ' · ' + st.genre);
+  // chase target bar (mission 3): the sedan's name + condition
   const def = missions.current;
+  if (missions.active && def && def.chase && chaseTarget.visible) {
+    hud.setTargetBar('AZURE SEDAN GT', chaseTarget.userData.hp / chaseTarget.userData.maxHp);
+  } else hud.setTargetBar(null);
+  // wanted bookkeeping: escapes counted, standing lost on new heat
+  if (state.prevWanted > 0 && police.wanted === 0 && state.mode === 'playing') {
+    state.stats.escapes += 1;
+  }
+  if (police.wanted > state.prevWanted && state.mode === 'playing') {
+    state.standing[dzName] = clamp((state.standing[dzName] ?? 50) - 4 * (police.wanted - state.prevWanted), 0, 100);
+  }
+  state.prevWanted = police.wanted;
+  // mission card (v8) — or the plain objective when idle
   if (missions.active && def) {
-    hud.setObjective(def.name + ' — ' + def.brief);
+    hud.setMissionCard({
+      num: missions.index + 1, total: MISSION_DEFS.length, name: def.name,
+      stage: missions.stage, stageCount: missions.stageCount,
+      stageText: missions.stageText, counter: missions.counterText,
+      next: missions.nextText,
+    });
     hud.setTimer(def.time > 0 ? missions.timer : 0);
   } else {
-    hud.setObjective('');
+    hud.setMissionCard(null);
     hud.setTimer(0);
   }
   refreshTouchUI();
@@ -1931,14 +2369,23 @@ function updatePickups(dt) {
         health.heal(50);
         hud.center('+50 HP', 'Kotak P3K');
         audio.play('chime');
+        state.stats.pickupsFound += 1;
         pk.taken = true; pk.respawnT = 45; pk.group.visible = false;
+      } else if (pk.kind === 'armour') {
+        if (health.armour >= health.armourMax) continue;   // fully plated: leave it
+        health.addArmour(60);
+        hud.center('+60 ARMOUR', 'Rompi anti-peluru');
+        audio.play('chime');
+        state.stats.pickupsFound += 1;
+        pk.taken = true; pk.respawnT = 60; pk.group.visible = false;
       } else {
         const w = pk.weapon;
         const fresh = !combat.owned.has(w);
+        state.stats.pickupsFound += 1;
         combat.giveWeapon(w);
         if (!state.inCar) combat.setWeapon(w);
         hud.center(fresh ? 'SENJATA BARU' : 'AMUNISI',
-          WEAPONS[w].label + ' · ' + combat.mags[w] + ' + ' + combat.reserves[w]);
+          WEAPONS[w].name + ' · ' + combat.mags[w] + ' + ' + combat.reserves[w]);
         audio.play('chime');
         pk.taken = true; pk.respawnT = 60; pk.group.visible = false;
       }
@@ -2033,6 +2480,8 @@ function updateHeadlights() {
 // ---------- busted / wasted ----------
 function showEnd(kind) {
   state.mode = kind;
+  if (kind === 'busted') state.stats.busts += 1;   // v8 career stats
+  else state.stats.wasteds += 1;
   document.body.classList.remove('in-game');
   audio.play(kind);
   endEl.classList.remove('hidden');
@@ -2085,13 +2534,23 @@ function stageFlockInView(flock, camPos, viewDir, dist, height) {
 function applyShot() {
   if (!SHOT) return;
   // deterministic scene for screenshots
-  if (SHOT === 'title') {
+  if (SHOT === 'title' || SHOT === 'v8title') {
     // seed a save so CONTINUE shows (spec: title lists New Game / Continue)
     saveData = {
       cash: 2450, missionIndex: 2, missionsDone: 2,
       x: 30, z: 30, health: 100, wanted: 0, when: Date.now(),
+      rankRp: 1450, stats: defaultStats(), medals: { 1: 'G', 2: 'S' },
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(saveData)); } catch {}
+    if (SHOT === 'v8title') {
+      // a second, earlier slot so the slot cards read like a life
+      try {
+        localStorage.setItem(SAVE_KEY + '-2', JSON.stringify({
+          cash: 640, missionIndex: 0, missionsDone: 0, x: 30, z: 30,
+          health: 100, wanted: 0, when: Date.now() - 86400000, rankRp: 300,
+        }));
+      } catch {}
+    }
     showTitle();
     // high wide vista from the east, looking west into the sunset:
     // sun disc in the upper-left third, skyline silhouettes below it.
@@ -2404,6 +2863,113 @@ function applyShot() {
     shotCamTarget = new THREE.Vector3(cx - 1, 0.8, cz + 2);
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'v8chase') {
+    // v8 dossier cover: DAYTIME chase on the beachfront avenue —
+    // wanted 5, KITE-1 overhead, the full named HUD live, THE
+    // CHASE at stage 2/3 with one ram already landed.
+    state.inCar = true;
+    player.visible = false;
+    car.position.set(-210, 0, 60);
+    car.rotation.y = 0;
+    state.carSpeed = 26;
+    state.camYaw = car.rotation.y + Math.PI;
+    state.clockMin = 800;   // 13:20 — full day
+    state.cash = 2450;
+    state.missionsDone = 2;
+    state.rankRp = 2450;
+    state.standing['BEACHFRONT'] = 58;
+    police.setWanted(5);
+    missions.start(2);
+    missions.chaseHits = 1;
+    missions.stage = 2;
+    missions.stageText = missions.current.stages[1];
+    missions.counterText = 'TABRAKAN 1/3';
+    missions.setNextText(missions.current);
+    preroll(4);
+    const slots = [[-6, -12], [7.5, -5], [-3, -26], [7, -34], [-7, -40]];
+    police.cars.forEach((pc, i) => {
+      pc.position.set(car.position.x + slots[i][0], 0, car.position.z + slots[i][1]);
+      pc.rotation.y = car.rotation.y;
+      pc.userData.speed = 24;
+    });
+    for (const o of police.officers) o.person.visible = false;
+    police.stageHeli(car.position, 0.85);
+    // pull KITE-1 INTO the frame: ahead-left, low enough to read
+    // against the sky (the live orbit resumes the moment the sim
+    // runs, but the dossier frame catches it here)
+    if (police.heli) {
+      police.heli.position.set(car.position.x - 13, 12.5, car.position.z + 30);
+      police.heli.rotation.y = Math.atan2(
+        car.position.x - police.heli.position.x, car.position.z - police.heli.position.z);
+    }
+    shotCamPos = new THREE.Vector3(car.position.x - 7.5, 6.0, car.position.z - 21);
+    shotCamTarget = new THREE.Vector3(car.position.x + 0.5, 1.6, car.position.z + 10);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+    const viewDir = new THREE.Vector3(0, 0, 1);
+    stageFlockInView(flockCity, shotCamPos, viewDir, 60, 11);
+    state.camYaw = car.rotation.y + Math.PI;
+  } else if (SHOT === 'v8night') {
+    // v8 dossier: NIGHT on foot on the promenade — purple sky, lit
+    // windows, lamp glow, Dario armed with a vest on, one star.
+    state.inCar = false;
+    player.position.set(-198.7, 0, -10);
+    state.heading = 0;
+    state.camYaw = state.heading + Math.PI;
+    missions.start(0);
+    state.cash = 860;
+    state.clockMin = 1255;   // 20:55 — full night
+    state.missionsDone = 1;
+    state.rankRp = 950;
+    health.hp = 82;
+    health.armour = 35;
+    combat.giveWeapon('smg');
+    combat.setWeapon('pistol');
+    preroll(4);
+    police.setWanted(1);
+    player.position.set(-198.7, 0, -4);
+    player.rotation.x = 0;
+    state.heading = 0;
+    const walker = peds.peds[0];
+    walker.position.set(-198.7, 0, 14);
+    walker.userData.along = 14;
+    walker.userData.heading = Math.PI;
+    walker.userData.vertical = true;
+    walker.userData.roadLine = -210;
+    walker.userData.side = 11.3;
+    walker.userData.speed = 1.5;
+    dog.owner = walker;
+    dog.dog.position.set(-198.0, 0, 11);
+    dog.dog.rotation.y = Math.PI;
+    dog.update(0);
+    shotCamPos = new THREE.Vector3(player.position.x + 0.7, 1.85, player.position.z - 4.6);
+    shotCamTarget = new THREE.Vector3(player.position.x + 0.3, 1.3, player.position.z + 7);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+    state.camYaw = state.heading + Math.PI;
+  } else if (SHOT === 'v8stats') {
+    // v8 dossier: the pause STATS tab over a mid-career save —
+    // completion ring, checklist, medals, career numbers.
+    state.cash = 3120;
+    state.missionsDone = 4;
+    state.rankRp = 2650;
+    state.medals = { 1: 'G', 2: 'S', 3: 'G', 4: 'B' };
+    state.stats = {
+      carsStolen: 9, escapes: 5, distanceKm: 18.4, topSpeedKmh: 118,
+      busts: 1, wasteds: 0, pickupsFound: 6, cashEarned: 3000,
+    };
+    state.districtsVisited = ['BEACHFRONT', 'DOWNTOWN', 'THE PALMS', 'MIDTOWN', 'GANG TURF — PALM BAY GREENS'];
+    state.standing['BEACHFRONT'] = 68;
+    state.standing['GANG TURF — PALM BAY GREENS'] = 31;
+    combat.giveWeapon('smg');
+    combat.giveWeapon('shotgun');
+    missions.start(4);
+    hud.hideDialogue();
+    hud.el['hud-titlecard'].classList.remove('show');
+    state.mode = 'paused';
+    pauseEl.classList.remove('hidden');
+    switchTab('stats');
+    fillStats();
   }
   syncHUD();
   // one minimap draw right away so the first frame already shows it
@@ -2434,6 +3000,21 @@ function animate() {
   }
   state.time += dt;
   state.clockMin += dt / 10;   // golden hour drifts slowly, never resets
+  updateDayNight();
+  if (state.mode === 'playing') {
+    // v8: crew cooldowns + Kiki's window tick with the sim
+    for (const c of CREW) state.crew[c.id] = Math.max(0, state.crew[c.id] - dt);
+    state.eyesOutT = Math.max(0, state.eyesOutT - dt);
+    // v8 career stats: distance travelled + top speed
+    const tp = state.inCar ? car.position : player.position;
+    if (_lastPos.x !== null) {
+      state.stats.distanceKm += Math.hypot(tp.x - _lastPos.x, tp.z - _lastPos.z) / 1000;
+    }
+    _lastPos.set(tp.x, 0, tp.z);
+    if (state.inCar) {
+      state.stats.topSpeedKmh = Math.max(state.stats.topSpeedKmh, Math.abs(state.carSpeed) * 3.6);
+    }
+  }
 
   // sea: vertex waves (throttled) + texture drift for shimmer
   frameNo += 1;
@@ -2506,9 +3087,10 @@ function animate() {
         for (const p of peds.peds) carPersonHit(pc, p, pSpd);
       }
     }
-    police.decay(dt);
+    police.decay(dt * (state.eyesOutT > 0 ? 3 : 1));   // v8: Kiki's window cools heat faster
     audio.setSiren(police.wanted > 0, dt);
     // mission logic
+    missions.heat = police.heat;   // v8: escape stages read heat bands
     if (missions.active) {
       const res = missions.update(dt, playerPos, state.inCar);
       if (res === 'complete') { /* event handler advances */ }
@@ -2571,6 +3153,8 @@ function animate() {
         if (state.district && state.splashT <= 0) hud.splash(dn);
         state.district = dn;
         state.splashT = 6;
+        // v8: districts visited feed the STATS completion ring
+        if (!state.districtsVisited.includes(dn)) state.districtsVisited.push(dn);
       }
       const pp = state.inCar ? car.position : player.position;
       // v7: blips written into a reused array (stable element
@@ -2610,7 +3194,7 @@ function animate() {
     }
   } else if (state.mode === 'title') {
     // slow orbit over the city vista — frozen for the staged title shot
-    if (SHOT !== 'title') {
+    if (SHOT !== 'title' && SHOT !== 'v8title') {
       const a = state.time * 0.02;
       camera.position.set(Math.sin(a) * 170, 55, Math.cos(a) * 170);
       camera.lookAt(0, 10, 0);
@@ -2639,4 +3223,8 @@ window.__game = {
   // v6 handles for the play-tests
   gangMembers, pickups, courier, skidMarks, explosion,
   damageCarFromHit, explodeCar,
+  // v8 handles for the play-tests
+  sun, CREW, RANKS, rankOf, useAbility, switchTab, fillStats,
+  loadSlot, setActiveSlot, slotKey, dayFactor,
+  getSkyU: () => skyU,
 };
