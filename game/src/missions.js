@@ -40,7 +40,7 @@ export const MISSION_DEFS = [
   {
     id: 4, name: 'HOT DELIVERY',
     brief: 'Deliver the package to Palm Bay Motors before the timer runs out.',
-    target: [90, -30], time: 75, reward: CFG.missionReward[3],
+    target: [90, -30], time: 150, reward: CFG.missionReward[3],
     text: 'Antar paket tepat waktu!',
   },
   {
@@ -60,7 +60,7 @@ export const MISSION_DEFS = [
   {
     id: 7, name: 'THE FINALE',
     brief: 'Final job: bring the cash to Mama Rosa at the diner. No mistakes.',
-    target: [30, 30], time: 90, reward: CFG.missionReward[6],
+    target: [30, 30], time: 180, reward: CFG.missionReward[6],
     text: 'Bawa uangnya ke Mama Rosa.',
   },
 ];
@@ -83,6 +83,11 @@ export class Missions {
     this.followDone = false;   // courier reached the last waypoint
     this.loseT = 0;            // seconds spent outside the follow band
     this.wpIndex = 0;          // courier waypoint reached (CHECKPOINT)
+    // v7: start-of-mission grace — the timer and the follow loseT stay
+    // frozen for the first seconds so the player can read the dialogue
+    // card / get into a car; failure can only happen at true expiry.
+    this.graceT = 0;
+    this.loseWarned = false;
   }
   get current() { return MISSION_DEFS[this.index] || null; }
   get started() { return this.active; }
@@ -96,6 +101,8 @@ export class Missions {
     this.followDone = false;
     this.loseT = 0;
     this.wpIndex = 0;
+    this.graceT = 4;
+    this.loseWarned = false;
     const def = this.current;
     this.timer = def.time || 0;
     this.placeMarker(def.target[0], def.target[1]);
@@ -152,7 +159,11 @@ export class Missions {
   update(dt, playerPos, playerInCar) {
     if (!this.active || this.done) return null;
     const def = this.current;
-    if (def.time > 0) {
+    // v7 grace: no timer drain, no follow-lose accumulation while the
+    // grace window runs — failing "too fast" was Jaka's complaint.
+    const inGrace = this.graceT > 0;
+    if (inGrace) this.graceT = Math.max(0, this.graceT - dt);
+    if (def.time > 0 && !inGrace) {
       this.timer -= dt;
       if (this.timer <= 0) {
         this.fail('Waktu habis! Misi gagal.');
@@ -174,18 +185,27 @@ export class Missions {
     // because the target point is the chase car's start position
     if (def.chase) return null;
     // v6 follow mission: main drives the courier; the player must
-    // stay inside the follow band (4..32 m). Five seconds outside
-    // the band loses the tail and fails the mission.
+    // stay inside the follow band (4..32 m). v7: TEN seconds outside
+    // the band loses the tail (was five — failed far too fast), the
+    // recovery is 3x, the grace window freezes accumulation, and a
+    // warning banner fires before the fail so it never feels sudden.
     if (def.follow) {
       if (this.followDone) return this.complete();
       if (this.followPos) {
         const d = Math.hypot(
           playerPos.x - this.followPos.x, playerPos.z - this.followPos.z);
-        if (d > 32 || d < 2.2) this.loseT += dt;
-        else this.loseT = Math.max(0, this.loseT - dt * 2);
-        if (this.loseT > 5) {
-          this.fail(d < 2.2 ? 'Terlalu dekat — kurirnya kabur!' : 'Kehilangan jejak kurir!');
-          return 'failed';
+        if (!inGrace) {
+          if (d > 32 || d < 2.2) this.loseT += dt;
+          else this.loseT = Math.max(0, this.loseT - dt * 3);
+          if (this.loseT > 4 && !this.loseWarned) {
+            this.loseWarned = true;
+            this.emit('followwarn', def);
+          }
+          if (this.loseT <= 2) this.loseWarned = false;
+          if (this.loseT > 10) {
+            this.fail(d < 2.2 ? 'Terlalu dekat — kurirnya kabur!' : 'Kehilangan jejak kurir!');
+            return 'failed';
+          }
         }
       }
       return null;

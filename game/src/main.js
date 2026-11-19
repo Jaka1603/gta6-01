@@ -337,6 +337,7 @@ const state = {
   heroMax: 0,         // v3: hero top speed to restore after a steal
   // v6 additions
   footVel: { x: 0, z: 0 },   // acceleration-based on-foot velocity (D)
+  groundY: 0,                // v7: the ground height under the player (pier deck 1.5, bar slab 0.18, else 0) — tracked separately because walk()/idle() own position.y for the gait bob
   firing: false,             // trigger held (auto weapons keep firing)
   punchT: 0,                 // player punch swing timer (M)
   gangAggroT: 0,             // seconds of gang hostility left
@@ -383,10 +384,26 @@ function writeSave() {
 // Circle-vs-AABB push-out against the real building footprints.
 // Returns how far the position was moved (0 = no contact).
 function collideBuildings(pos, radius) {
+  return collideRects(pos, radius, worldInfo.buildingRects, null);
+}
+// v7: step-aware collision against worldInfo.extraRects (pier deck,
+// pier ramp, promenade fence). A rect is skipped when the mover is
+// standing ON its structure (ground height at his feet reaches its
+// top within a step) — that is what lets the player climb the pier
+// ramp yet never walk through the deck's side or under it.
+function collideExtraRects(pos, radius, y, canStand) {
+  return collideRects(pos, radius, worldInfo.extraRects, canStand
+    ? (r) => {
+        const gh = groundHeightAt(pos.x, pos.z);
+        return gh > 0 && Math.abs(gh - y) <= 0.65 && r.top >= gh - 0.01;
+      }
+    : null);
+}
+function collideRects(pos, radius, rects, skip) {
   let moved = 0;
-  const rects = worldInfo.buildingRects;
   for (let i = 0; i < rects.length; i++) {
     const r = rects[i];
+    if (skip && skip(r)) continue;
     const nx = clamp(pos.x, r.x0, r.x1);
     const nz = clamp(pos.z, r.z0, r.z1);
     const dx = pos.x - nx, dz = pos.z - nz;
@@ -410,6 +427,57 @@ function collideBuildings(pos, radius) {
     }
   }
   return moved;
+}
+
+// ---------- v7 ground height (pier deck / ramp / bar deck) -------
+// The world was flat (y = 0) until v7 — the pier deck floated 1.5 m
+// over the water with the player walking underneath it. Zones come
+// from world.js; height lerps h0→h1 along x inside a zone.
+function groundHeightAt(x, z) {
+  let h = 0;
+  const zones = worldInfo.groundZones;
+  for (let i = 0; i < zones.length; i++) {
+    const g = zones[i];
+    if (x >= g.x0 && x <= g.x1 && z >= g.z0 && z <= g.z1) {
+      const gh = g.h0 + (g.h1 - g.h0) * ((x - g.x0) / (g.x1 - g.x0));
+      if (gh > h) h = gh;
+    }
+  }
+  return h;
+}
+// Feet follow the ground with a 0.65 m step limit (a tall structure
+// beside you does not teleport you on top of it), the pier railing
+// line holds you on the deck, and the shoreline stops wading.
+// The tracked height lives in state.groundY: walk() writes the gait
+// bob into position.y as an ABSOLUTE value every frame, so the
+// step test must compare against the tracked height, never the
+// bob — the first v7 build compared against the bob and the deck's
+// 1.5 m step never engaged (the player was ejected off the ramp).
+// position.y going in holds only the bob (or 0); the final y is
+// groundY + bob.
+function applyGroundAndBounds() {
+  const p = player.position;
+  // containment FIRST, while the tracked height still says "on the
+  // pier": the railing line (deck sides + west end) holds him, so
+  // he can only leave the deck via the ramp
+  if (state.groundY > 1.0 && p.z > 54 && p.z < 70.5) {
+    if (p.x < -246.5) {
+      p.z = clamp(p.z, 56.4, 63.6);
+      if (p.x < -299.5) p.x = -299.5;
+    } else if (p.x < -238.5) {
+      p.z = clamp(p.z, 56.4, 68.6);
+      // the platform's west railing: on the north strip he stops at
+      // the pad's edge instead of sliding off or onto the deck line
+      if (p.z > 63.6 && p.x < -245.5) p.x = -245.5;
+      if (p.x < -299.5) p.x = -299.5;
+    }
+  }
+  const gh = groundHeightAt(p.x, p.z);
+  if (gh - state.groundY <= 0.65) state.groundY = gh;
+  if (state.groundY <= 0.05 && gh === 0 && p.x < -243 && p.x > -252) {
+    p.x = -243;   // the shoreline wash (sea edge -245) — no wading
+  }
+  p.y = state.groundY + p.y;
 }
 
 // ---------- v6 vehicle damage + explosions (brief G) -------------
@@ -441,6 +509,7 @@ function explodeCar(c) {
   };
   for (const p of peds.peds) hurtNear(p, false);
   for (const m of gangMembers) hurtNear(m, false);
+  for (const o of police.officers) hurtNear(o.person, false);   // v7: officers take blast damage too
   if (!state.inCar) hurtNear(player, true);
   const all = [car, chaseTarget, ...parked, ...traffic.cars, ...police.cars];
   for (const oc of all) {
@@ -519,6 +588,7 @@ function startGame(fromSave) {
   state.transition = null;
   state.exitPending = false;
   state.gangAggroT = 0;
+  state.groundY = 0;
   player.visible = true;
   // v6: wrecks from a previous run are repaired on a fresh start
   for (const c of [car, chaseTarget, ...parked]) if (c.userData.exploded) restoreCar(c);
@@ -652,6 +722,10 @@ missions.onEvent = (type, payload) => {
   } else if (type === 'chaseHit') {
     hud.center('TABRAKAN!', payload.hits + ' / 3');
     audio.play('punch');
+  } else if (type === 'followwarn') {
+    // v7: the follow mission warns BEFORE it can fail (10 s leash)
+    hud.banner('JANGAN SAMPAI LEPAS — DEKATI KURIR!');
+    audio.play('mission');
   } else if (type === 'allDone') {
     // story complete
   }
@@ -835,7 +909,7 @@ addEventListener('resize', () => {
 // the same action functions as the keyboard. Dragging the right
 // half of the screen orbits the camera into state.camOffsetTarget,
 // which updateCamera damps toward — no jitter, no snapping.
-const STICK_DEAD = 0.12;   // dead zone, as a fraction of full travel
+const STICK_DEAD = 0.10;   // dead zone, as a fraction of full travel (v7: tighter)
 const STICK_TRAVEL = 70;   // px of thumb travel = full deflection
 let touchTapAt = 0;
 let stickPointer = null;
@@ -1296,7 +1370,10 @@ function updatePlayer(dt) {
     state.footVel.z = 0;
     state.sprinting = false;
     if (!u.knock) state.heading = player.rotation.y;
+    player.position.y = 0;   // v7: knock owns no bob; ground adds back below
     collideBuildings(player.position, 0.45);
+    collideExtraRects(player.position, 0.45, state.groundY, true);
+    applyGroundAndBounds();
     return;
   }
   const inp = state.input;
@@ -1329,7 +1406,7 @@ function updatePlayer(dt) {
     let dh = wantAng - state.heading;
     while (dh > Math.PI) dh -= TAU;
     while (dh < -Math.PI) dh += TAU;
-    state.heading += clamp(dh, -10.5 * dt, 10.5 * dt);
+    state.heading += clamp(dh, -12 * dt, 12 * dt);
   }
   // v6 (brief D): movement is VELOCITY-based now — acceleration and
   // damping curves instead of teleport-speed. The stick gets an
@@ -1341,9 +1418,10 @@ function updatePlayer(dt) {
   if ((mx || mz) && speed > 0.01) {
     let sp = speed;
     if (inp.stick && !runKey) {
-      // analog expo: t^1.35 through the dead zone
+      // analog expo through the dead zone (v7: 1.22 — a gentler
+      // curve, so mid-stick deflections answer more precisely)
       const t = clamp((inp.mag - STICK_DEAD) / (1 - STICK_DEAD), 0, 1);
-      sp = CFG.playerRun * Math.pow(t, 1.35);
+      sp = CFG.playerRun * Math.pow(t, 1.22);
     }
     desX = Math.sin(state.heading) * sp;
     desZ = Math.cos(state.heading) * sp;
@@ -1362,9 +1440,11 @@ function updatePlayer(dt) {
     player.position.x += fv.x * dt;
     player.position.z += fv.z * dt;
     // v6 (brief C): the sand, the pier and the beach bar are inside
-    // the world now — the old ±208 clamp walled the mission off
-    player.position.x = clamp(player.position.x, -246, 208);
-    player.position.z = clamp(player.position.z, -208, 208);
+    // the world now — the old ±208 clamp walled the mission off.
+    // v7: the pier deck (west end -300) and the port apron (cranes
+    // at +228, containers to +236) are inside too.
+    player.position.x = clamp(player.position.x, -304, 244);
+    player.position.z = clamp(player.position.z, -246, 246);
     player.rotation.y = state.heading;
     const sf = clamp((state.footSpeed - CFG.playerWalk) / (CFG.playerRun - CFG.playerWalk), 0, 1);
     state.sprinting = sf > 0.55;
@@ -1378,10 +1458,15 @@ function updatePlayer(dt) {
     }
   } else {
     state.sprinting = false;
+    player.position.y = 0;   // v7: idle() decays y — keep it bob-only
     u.idle();
   }
   // v3: buildings are solid for the player too (v2 walked through them)
   collideBuildings(player.position, 0.45);
+  // v7: pier / ramp / fence collision (skip test reads the tracked
+  // ground height), then ground height + deck/shoreline bounds
+  collideExtraRects(player.position, 0.45, state.groundY, true);
+  applyGroundAndBounds();
   // keep the aim pose while armed
   if (combat.weapon !== 'fists') u.armR.rotation.x = -1.35;
   // v6 (brief M): the punch swing — a fast jab out and back
@@ -1395,9 +1480,12 @@ function updatePlayer(dt) {
 
 // v7: pooled drive vectors — updateCar runs per frame, no new
 const _carFwd = new THREE.Vector3();
+const _chaseFwd = new THREE.Vector3();
 const _carRight = new THREE.Vector3();
 const _carBack = new THREE.Vector3();
 const _exhaustTip = new THREE.Vector3();
+// v7 controls: smoothed steer / throttle / body-roll state
+let steerSm = 0, throttleSm = 0, carRollSm = 0;
 
 function updateCar(dt) {
   const u = car.userData;
@@ -1415,6 +1503,16 @@ function updateCar(dt) {
   }
   const braking = inp.brake;
   if (braking) throttle = -1.4;
+  // v7 controls: throttle is SMOOTHED (no digital on/off lurch when
+  // feathering the gas) — but the brake pedal, S-braking at speed
+  // and the exit emergency stop stay instant.
+  if (braking || state.exitPending || (throttle < 0 && state.carSpeed > 3)) {
+    throttleSm = throttle;
+  } else {
+    const tRate = throttle === 0 ? 7 : 5;
+    throttleSm += clamp(throttle - throttleSm, -tRate * dt, tRate * dt);
+  }
+  throttle = throttleSm;
   // v5 amendment: ACT at speed does not eject — it stands on the
   // brakes, and the exit sequence starts once nearly stopped
   if (state.exitPending) {
@@ -1442,14 +1540,27 @@ function updateCar(dt) {
   if (stickDriving) steer = -inp.ax * (0.55 + 0.45 * Math.abs(inp.ax));
   else steer = -inp.ax;
   if (state.exitPending) steer = 0;
+  // v7 controls: the applied steer is smoothed — fast attack, faster
+  // release — which kills the digital twitch Jaka felt without
+  // adding lag; the same value steers the visible front wheels.
+  const sRate = Math.abs(steer) > Math.abs(steerSm) ? 8 : 11;
+  steerSm += clamp(steer - steerSm, -sRate * dt, sRate * dt);
+  steer = steerSm;
   const spd = state.carSpeed;
   if (Math.abs(spd) > 0.5) {
     // v6 (brief D): steering authority fades a little at speed —
-    // planted, not twitchy
+    // planted, not twitchy. v7: more authority where it was mushy —
+    // the low-speed floor is 0.5 (was 0.3) reached by 9 m/s (was
+    // 12), and the top-speed fade is gentler (0.15, was 0.25).
     car.rotation.y += steer * CFG.carTurn * dt *
-      clamp(Math.abs(spd) / 12, 0.3, 1) * (1 - 0.25 * Math.abs(spd) / Math.max(1, u.maxSpeed)) *
+      clamp(Math.abs(spd) / 9, 0.5, 1) * (1 - 0.15 * Math.abs(spd) / Math.max(1, u.maxSpeed)) *
       Math.sign(spd);
   }
+  // v7 realism: body roll into corners — pure local Z roll, so the
+  // forward vector stays level and the driving maths is untouched
+  const rollTarget = clamp(-steer * spd * 0.0032, -0.055, 0.055);
+  carRollSm += (rollTarget - carRollSm) * Math.min(1, dt * 7);
+  car.rotation.z = carRollSm;
   const fwd = _carFwd.set(0, 0, 1).applyEuler(car.rotation);
   // v7 (skill: fast movers never tunnel): sub-step the travel so
   // no sub-step moves more than ~1.1 m — at top speed a frame step
@@ -1459,10 +1570,13 @@ function updateCar(dt) {
   let wallHit = false;
   for (let s = 0; s < steps; s++) {
     car.position.addScaledVector(fwd, spd * sdt);
-    // v6 (brief C): cars can reach the beach road end too
-    car.position.x = clamp(car.position.x, -238, 208);
-    car.position.z = clamp(car.position.z, -208, 208);
+    // v6 (brief C): cars can reach the beach road end too.
+    // v7: the port apron is drivable (east toward the cranes); the
+    // pier stays pedestrian-only — its rects below stop cars.
+    car.position.x = clamp(car.position.x, -238, 242);
+    car.position.z = clamp(car.position.z, -246, 246);
     if (collideBuildings(car.position, 2.3) > 0) wallHit = true;
+    if (collideExtraRects(car.position, 1.35, 0, false) > 0) wallHit = true;
   }
   // v5: the wheels finally turn — spin with travel, fronts steer
   rollWheels(car, spd * dt);
@@ -1579,7 +1693,7 @@ function updateChaseTarget(dt) {
   while (diff < -Math.PI) diff += Math.PI * 2;
   chaseTarget.rotation.y += clamp(diff, -1.6 * dt, 1.6 * dt);
   u.speed = lerp(u.speed, u.maxSpeed, dt);
-  const fwd = new THREE.Vector3(0, 0, 1).applyEuler(chaseTarget.rotation);
+  const fwd = _chaseFwd.set(0, 0, 1).applyEuler(chaseTarget.rotation);
   chaseTarget.position.addScaledVector(fwd, u.speed * dt);
   rollWheels(chaseTarget, u.speed * dt);
   // v5: the fleeing driver knocks people down too — nobody ghosts
@@ -1588,6 +1702,7 @@ function updateChaseTarget(dt) {
   chaseTarget.position.z = clamp(chaseTarget.position.z, -205, 205);
   // v3: the chase car respects buildings too (it fled through them)
   collideBuildings(chaseTarget.position, 2.3);
+  collideExtraRects(chaseTarget.position, 1.35, 0, false);
 }
 
 // ---------- camera ----------
@@ -1658,7 +1773,9 @@ function updateCamera(dt) {
   let dy = wantYaw - state.camYaw;
   while (dy > Math.PI) dy -= TAU;
   while (dy < -Math.PI) dy += TAU;
-  state.camYaw += dy * (1 - Math.exp(-4.2 * dt));
+  // v7 controls: on foot the camera re-centres faster (5.4 — tighter
+  // follow, less swim); driving keeps the calmer 4.2
+  state.camYaw += dy * (1 - Math.exp(-(state.inCar ? 4.2 : 5.4) * dt));
   const cx = focus.x + Math.sin(state.camYaw) * dist;
   const cz = focus.z + Math.cos(state.camYaw) * dist;
   // v6: spring-damped position (no lerp pops when the focus
@@ -2228,6 +2345,9 @@ function applyShot() {
       if (off) {
         off.mode = 'fire';
         off.person.position.set(95.6, 0, -45.6);
+        // v7: the fire stance holds o.anchor — staging must set it,
+        // or the live loop teleports the officer to (0,0,0)
+        off.anchor.copy(off.person.position);
         off.person.rotation.y = Math.atan2(
           player.position.x - 95.6, player.position.z + 45.6);
         off.person.userData.armR.rotation.x = -1.35;
@@ -2373,8 +2493,18 @@ function animate() {
     const busted = police.update(dt, playerPos, playerSpeed, !state.inCar);
     // v3: pursuit cars collide with buildings like everyone else
     for (const pc of police.cars) {
-      collideBuildings(pc.position, 2.3);
+      const moved = collideBuildings(pc.position, 2.3);
+      collideExtraRects(pc.position, 1.35, 0, false);
+      // v7: a pursuit car that slams a wall LOSES its speed — v6
+      // left userData.speed untouched, so it ground against the
+      // wall at full throttle forever. Police cars also hit
+      // pedestrians physically now (v6: they ghosted through).
+      if (moved > 0.3) pc.userData.speed *= 0.35;
       rollWheels(pc, (pc.userData.speed || 0) * dt);
+      const pSpd = Math.abs(pc.userData.speed || 0);
+      if (pSpd > 3) {
+        for (const p of peds.peds) carPersonHit(pc, p, pSpd);
+      }
     }
     police.decay(dt);
     audio.setSiren(police.wanted > 0, dt);

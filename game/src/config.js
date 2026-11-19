@@ -117,7 +117,7 @@ export const CFG = {
   carAccel: 26,
   carBrake: 40,
   carMax: 34,
-  carTurn: 1.9,
+  carTurn: 2.0,
   trafficCount: 26,
   pedCount: 30,
   wantedMax: 5,

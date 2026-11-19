@@ -94,6 +94,14 @@ const paintMatFor = (paint) => new THREE.MeshStandardMaterial({
 const glassMat = new THREE.MeshStandardMaterial({
   color: 0x10151c, roughness: 0.12, metalness: 0.5,
 });
+// v7: police glass is genuinely transparent so the officer DRIVER is
+// visible sitting inside the car (Jaka: the officer appeared BESIDE
+// the moving car). Police cars also skip the solid cabin core (see
+// makeCar) and get a dash / bench / seat-backs in the trim pass.
+const policeGlassMat = new THREE.MeshStandardMaterial({
+  color: 0x35485c, roughness: 0.08, metalness: 0.4,
+  transparent: true, opacity: 0.45, depthWrite: false,
+});
 const trimMat = new THREE.MeshStandardMaterial({
   vertexColors: true, roughness: 0.7, metalness: 0.2,
 });
@@ -353,7 +361,11 @@ export function makeCar(styleIdx, color, isPolice = false) {
   g.add(shell);
   // ---- glasshouse: windshield, rear glass, side band, dark core --
   const G = [];
-  G.push({ geo: xform(box(s.w * 0.8, s.cabin, cabLen * 0.94), 0, bodyTop + s.cabin / 2 - 0.05, cabZ), color: 0x0c0e12 });
+  // v7: police cars skip the solid cabin core — the officer sits in
+  // there now and must be visible through the transparent glass.
+  if (!isPolice) {
+    G.push({ geo: xform(box(s.w * 0.8, s.cabin, cabLen * 0.94), 0, bodyTop + s.cabin / 2 - 0.05, cabZ), color: 0x0c0e12 });
+  }
   if (s.name !== 'van') {
     G.push({ geo: xform(box(s.w * 0.76, s.cabin * 0.95, 0.05), 0, bodyTop + s.cabin / 2, cabZ + cabLen / 2 + 0.01, -0.42), color: 0x18222e });
     G.push({ geo: xform(box(s.w * 0.76, s.cabin * 0.9, 0.05), 0, bodyTop + s.cabin / 2, cabZ - cabLen / 2 - 0.01, 0.3), color: 0x18222e });
@@ -367,7 +379,7 @@ export function makeCar(styleIdx, color, isPolice = false) {
       G.push({ geo: xform(box(0.05, s.cabin * 0.62, s.l * 0.3), sx * s.w * 0.46, bodyTop + s.cabin / 2 + 0.3, s.l * 0.22), color: 0x18222e });
     }
   }
-  const glass = new THREE.Mesh(mergeColored(G), glassMat);
+  const glass = new THREE.Mesh(mergeColored(G), isPolice ? policeGlassMat : glassMat);
   glass.castShadow = true;
   g.add(glass);
   // ---- trim: bumpers, grille, sills, stalks, bed floor, exhaust --
@@ -383,6 +395,15 @@ export function makeCar(styleIdx, color, isPolice = false) {
   }
   if (s.name === 'pickup') {
     T.push({ geo: xform(box(s.w * 0.9, 0.06, s.l * 0.36), 0, bodyTop + 0.03, -s.l * 0.33), color: 0x222226 });
+  }
+  if (isPolice) {
+    // v7: a simple cabin the seated officer can be seen in — dash,
+    // rear bench and two front seat-backs (opaque trim, dark cloth).
+    T.push({ geo: xform(box(s.w * 0.8, 0.3, 0.35), 0, bodyTop - 0.05, cabZ + cabLen / 2 - 0.2), color: 0x14161c });
+    T.push({ geo: xform(box(s.w * 0.78, 0.5, 0.5), 0, bodyTop - 0.2, cabZ - cabLen * 0.28), color: 0x1a1d24 });
+    for (const sx of [-1, 1]) {
+      T.push({ geo: xform(box(0.52, 0.6, 0.13), sx * 0.42, bodyTop + 0.1, cabZ + 0.22), color: 0x1a1d24 });
+    }
   }
   const trim = new THREE.Mesh(mergeColored(T), trimMat);
   g.add(trim);

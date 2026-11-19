@@ -41,6 +41,12 @@ export const worldInfo = {
   doors: [],           // {x,z,yaw,block,zone} every building's entrance
   houses: [],          // enterable house records (briefs J/K)
   beachBar: null,      // { door:{x,z}, rect } — mission 1 anchor (brief C)
+  // v7 additions: step-aware collision rects (pier, ramp, promenade
+  // fence — each with a `top` the player can be above) and ground
+  // height zones (pier deck, pier ramp, beach-bar deck): h lerps
+  // from h0 at x0 to h1 at x1 inside the zone.
+  extraRects: [],      // {x0,z0,x1,z1,top}
+  groundZones: [],     // {x0,z0,x1,z1,h0,h1}
 };
 
 // --- v3 geometry helpers: merge many small geoms into ONE draw call ---
@@ -554,7 +560,16 @@ export function buildWorld(scene, rand) {
       { x0: x + w / 2 - T, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 },
       { x0: x - w / 2, z0: z + d / 2 - T, x1: x + w / 2, z1: z + d / 2 },
       { x0: x - w / 2, z0: z - d / 2, x1: doorX - doorW / 2, z1: z - d / 2 + T },
-      { x0: doorX + doorW / 2, z0: z - d / 2, x1: x + w / 2, z1: z - d / 2 + T }
+      { x0: doorX + doorW / 2, z0: z - d / 2, x1: x + w / 2, z1: z - d / 2 + T },
+      // v7: the big furniture is solid too — v6 let the player walk
+      // straight through the sofa, tables, bed and kitchen run.
+      // One merged block per furniture cluster: pieces stand closer
+      // together than the player's diameter, so per-piece rects
+      // would push him back and forth between neighbours forever.
+      { x0: x - w / 2 + 0.3, z0: z - 2.18, x1: x - w / 2 + 3.45, z1: z + 0.18 },
+      { x0: x + 0.05, z0: z + d / 2 - 0.95, x1: x + w / 2 - 0.35, z1: z + d / 2 - 0.22 },
+      { x0: x + 0.55, z0: z + 0.42, x1: x + 2.05, z1: z + 1.38 },
+      { x0: x - w / 2 + 0.9, z0: z + d / 2 - 2.9, x1: x - w / 2 + 4.3, z1: z + d / 2 - 0.2 }
     );
     worldInfo.houses.push({
       x, z, w, d, idx, block: blockKey,
@@ -636,6 +651,8 @@ export function buildWorld(scene, rand) {
     const rect = { x0: bx - w / 2, z0: bz - d / 2, x1: bx + 1.6, z1: bz + d / 2 };
     worldInfo.buildingRects.push(rect);
     worldInfo.beachBar = { door: { x: bx + w / 2 + 1.5, z: bz }, rect };
+    // v7: the bar's deck slab is a ground zone — feet sit ON it (0.18)
+    worldInfo.groundZones.push({ x0: bx - 4.75, z0: bz - 4, x1: bx + 4.75, z1: bz + 4, h0: 0.18, h1: 0.18 });
     worldInfo.doors.push({ x: bx + w / 2 + 0.1, z: bz, yaw: Math.PI / 2, block: 'beach', zone: 'beach' });
   }
 
@@ -908,6 +925,9 @@ export function buildWorld(scene, rand) {
     trunks.frustumCulled = false;
     canopies.frustumCulled = false;
     group.add(trunks, canopies);
+    // v7: kept reachable so the late port-collision pass (below)
+    // can drop a tree the new rects invalidate and rebuild these
+    worldInfo.treeMeshes = { trunks, canopies };
   }
 
   // -- v3 STREET LAMPS (Jaka fix #2): instanced posts every ~28 m,
@@ -1353,10 +1373,53 @@ export function buildWorld(scene, rand) {
     crane.add(leg1, leg2, top, cab);
     crane.position.set(x, 0, z);
     group.add(crane);
+    // v7: the port is enterable now (clamps widened in main) — the
+    // crane legs and container stacks are solid, not ghost scenery
+    worldInfo.buildingRects.push(
+      { x0: x - 7, z0: z - 1, x1: x - 5, z1: z + 1 },
+      { x0: x + 5, z0: z - 1, x1: x + 7, z1: z + 1 }
+    );
     for (let cI = 0; cI < 5; cI++) {
+      const cx = x - 14 + (cI % 3) * 9;
+      const cz2 = z + 22 + Math.floor(cI / 3) * 4;
       const cc = box(8, 3, 3, [0x3a7a5a, 0xb85a2a, 0x2a5a8a, 0x8a2a3a][cI % 4],
-        x - 14 + (cI % 3) * 9, 1.6, z + 22 + Math.floor(cI / 3) * 4);
+        cx, 1.6, cz2);
       group.add(cc);
+      worldInfo.buildingRects.push({ x0: cx - 4, z0: cz2 - 1.5, x1: cx + 4, z1: cz2 + 1.5 });
+    }
+  }
+  // v7: the trees were planted BEFORE these port rects existed, so
+  // treeClear never saw them — one sidewalk tree on the last road
+  // (x 219.2, z 55.2) ended up inside a container footprint (the
+  // v3 placement audit caught it). Drop any tree the completed
+  // rect set invalidates and rebuild the two instanced meshes.
+  {
+    const kept = [];
+    for (const t of treeSpots) {
+      let ok = true;
+      for (const r of worldInfo.buildingRects) {
+        if (rectDist(t.x, t.z, r) < 1.5) { ok = false; break; }
+      }
+      if (ok) kept.push(t);
+    }
+    if (kept.length !== treeSpots.length && worldInfo.treeMeshes) {
+      treeSpots.length = 0;
+      treeSpots.push(...kept);
+      worldInfo.trees = kept.map((t) => ({ x: t.x, z: t.z }));
+      const dummy = new THREE.Object3D();
+      const { trunks, canopies } = worldInfo.treeMeshes;
+      kept.forEach((t, i) => {
+        dummy.position.set(t.x, 0, t.z);
+        dummy.rotation.set(0, t.rot, 0);
+        dummy.scale.setScalar(t.s);
+        dummy.updateMatrix();
+        trunks.setMatrixAt(i, dummy.matrix);
+        canopies.setMatrixAt(i, dummy.matrix);
+      });
+      trunks.count = kept.length;
+      canopies.count = kept.length;
+      trunks.instanceMatrix.needsUpdate = true;
+      canopies.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -1392,6 +1455,34 @@ export function buildWorld(scene, rand) {
     pier.castShadow = true;
     pier.receiveShadow = true;
     group.add(pier);
+    // v7: the pier is ENTERABLE. The deck spans x[-300,-240] (centre
+    // -HALF-60) at top y 1.5; the beach bar sits right at its east
+    // end, so access comes from the NORTH side: a landing platform
+    // at the deck's north-east corner + a plank ramp down to the
+    // sand, reached through the promenade gate gap (z 53..67).
+    // Before, the deck floated with no way up at all (Jaka's bug).
+    const platMat = new THREE.MeshStandardMaterial({ map: plankTex, roughness: 0.9 });
+    const platform = new THREE.Mesh(new THREE.BoxGeometry(7, 1.5, 6), platMat);
+    platform.position.set(-242.5, 0.75, 66);
+    platform.castShadow = true;
+    platform.receiveShadow = true;
+    group.add(platform);
+    const ramp = new THREE.Mesh(new THREE.BoxGeometry(11.1, 0.25, 4), platMat);
+    ramp.position.set(-233.5, 0.62, 66.5);
+    ramp.rotation.z = -Math.atan2(1.5, 11);
+    ramp.castShadow = true;
+    ramp.receiveShadow = true;
+    group.add(ramp);
+    worldInfo.groundZones.push(
+      { x0: -300, z0: 56, x1: -240, z1: 64, h0: 1.5, h1: 1.5 },
+      { x0: -246, z0: 63, x1: -239, z1: 69, h0: 1.5, h1: 1.5 },
+      { x0: -239, z0: 64.5, x1: -228, z1: 68.5, h0: 1.5, h1: 0 }
+    );
+    worldInfo.extraRects.push(
+      { x0: -300, z0: 56, x1: -240, z1: 64, top: 1.5 },
+      { x0: -246, z0: 63, x1: -239, z1: 69, top: 1.5 },
+      { x0: -239, z0: 64.5, x1: -228, z1: 68.5, top: 1.5 }
+    );
     const postGeo = new THREE.CylinderGeometry(0.09, 0.09, 1.1, 5);
     const postMat = mat(0x5a4028);
     const posts = new THREE.InstancedMesh(postGeo, postMat, 32);
@@ -1457,6 +1548,12 @@ export function buildWorld(scene, rand) {
     };
     mkFence(-180, 53);
     mkFence(67, 180);
+    // v7: the fence is solid — v6 rendered it but the player could
+    // stroll through anywhere; only the gate gap (z 53..67) passes
+    worldInfo.extraRects.push(
+      { x0: -HALF - 13.15, z0: -180, x1: -HALF - 12.65, z1: 53, top: 1.2 },
+      { x0: -HALF - 13.15, z0: 67, x1: -HALF - 12.65, z1: 180, top: 1.2 }
+    );
   }
 
   // gang territory in world coords (for minimap tint + staging)

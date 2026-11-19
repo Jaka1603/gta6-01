@@ -9,7 +9,7 @@ import { CFG, clamp } from './config.js';
 import { makeCar } from './vehicles.js';
 import { makeOfficer } from './gang.js';
 import { nearestRoadCoord } from './world.js';
-import { attachWeapon, detachWeapon, startBrawl, stopBrawl, updateBrawl } from './people.js';
+import { attachWeapon, detachWeapon, startBrawl, stopBrawl, updateBrawl, updateKnock, poseSeated, poseStand } from './people.js';
 
 // v7 hot-loop discipline: module scratch vectors — police.update
 // runs per frame per car/officer and must not allocate
@@ -90,21 +90,37 @@ export class Police {
     }
     this.group.add(car);
     this.cars.push(car);
-    // one officer heels the car (only the first two cars, for perf)
+    // one officer per car (only the first two cars, for perf). v7:
+    // the officer starts SEATED IN the car as its driver — the old
+    // build glued him 2.4 m beside the car at any speed (Jaka's bug).
     if (this.officers.length < 2) {
       const officer = makeOfficer();
       this.scene.add(officer);
-      this.officers.push({
+      const o = {
         person: officer, car,
-        // v6 fire/brawl state (briefs F + M)
-        mode: 'heel',               // heel | fire
+        // v7 FSM: ride | exit | heel | toAnchor | fire | return | enter
+        mode: 'ride',
         anchor: new THREE.Vector3(),
+        exitFrom: new THREE.Vector3(),
+        phaseT: 0, phase: 0,
+        returnTo: 'seat',           // return end-state: 'seat' | 'door'
         burstLeft: 0, burstT: 0,
         pauseT: 0.4 + this.officers.length * 0.5 + this.rand() * 0.4,
         burstAcc: 0.55,
-      });
+      };
+      this.officers.push(o);
+      this.placeAtSeat(o);
+      poseSeated(officer);
     }
     return car;
+  }
+  // v7: the officer's seat in car space — driver side (-X), dropped
+  // so torso + head sit inside the glass band under the roof line.
+  placeAtSeat(o) {
+    const { person, car } = o;
+    _side.set(-0.42, -0.25, 0.05).applyEuler(car.rotation);
+    person.position.copy(car.position).add(_side);
+    person.rotation.y = car.rotation.y;
   }
   update(dt, playerPos, playerSpeed, onFoot) {
     this.playerPos = playerPos;
@@ -121,9 +137,30 @@ export class Police {
       let diff = targetAngle - car.rotation.y;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      car.rotation.y += clamp(diff, -1.8 * dt, 1.8 * dt);
-      const targetSpeed = Math.min(u.maxSpeed, dist * 0.6 + 12);
+      // v7: a car whose officer is out on foot HOLDS position (he
+      // walks back to it); a car with its officer still aboard eases
+      // to a stop ~9 m from an on-foot player — the classic cop stop,
+      // and the only way the officer can ever get out: the old
+      // targetSpeed never dropped below 12 near the player, so the
+      // "stopped car" deploy gate was unreachable in real play.
+      const oc = this.officers.find((oo) => oo.car === car);
+      let targetSpeed = Math.min(u.maxSpeed, dist * 0.6 + 12);
+      if (oc && (oc.mode !== 'ride' || oc.person.userData.dead)) {
+        targetSpeed = 0;
+      } else if (oc && onFoot && this.wanted >= 1 && dist < 16) {
+        targetSpeed = Math.min(targetSpeed, Math.max(0, (dist - 9) * 1.4));
+      }
+      // a held car does not pivot in place to track the player
+      if (Math.abs(u.speed) > 0.4 || targetSpeed > 0.1) {
+        car.rotation.y += clamp(diff, -1.8 * dt, 1.8 * dt);
+      }
       u.speed += (targetSpeed - u.speed) * Math.min(1, dt * 1.5);
+      // v7: hard approach cap near an on-foot player — the eased
+      // target alone let the car blow past and orbit at speed, so
+      // it never settled into the stop that lets the officer out
+      if (oc && oc.mode === 'ride' && onFoot && this.wanted >= 1 && dist < 16) {
+        u.speed = Math.min(u.speed, Math.max(0, (dist - 8) * 1.2));
+      }
       const fwd = _fwd.set(0, 0, 1).applyEuler(car.rotation);
       car.position.addScaledVector(fwd, u.speed * dt);
       // light bar flash: red/blue alternate, glow sprites follow
@@ -148,13 +185,14 @@ export class Police {
     } else {
       this.bust = clamp(this.bust - dt * 8, 0, 100);
     }
-    // --- officers (v6, briefs F + M) -------------------------------
-    // wanted >= 2: once their car is stopped in range, officers get
-    // out and SHOOT — bursty pistol fire (2-4 rounds, 0.9-1.6 s
-    // between bursts, staggered per officer, accuracy tightening
-    // inside a burst), holding an 8-14 m standoff from the player.
-    // wanted == 1: fists only — an officer whose car is stopped near
-    // an on-foot player wades in and brawls.
+    // --- officers (v7 FSM) ----------------------------------------
+    // ride: SEATED in the car as its driver (v6 glued the officer
+    // 2.4 m beside the car at ANY speed — Jaka's headline bug).
+    // When the car stops near a slow/on-foot player the officer
+    // exits (door swings), then: wanted >= 2 — walks to an 8-14 m
+    // firing anchor and shoots bursty pistol fire (v6 ballistics
+    // kept); wanted == 1 — wades in and brawls. If the action moves
+    // away he runs back, gets in, and the chase resumes.
     for (const o of this.officers) {
       const { person, car } = o;
       const u = person.userData;
@@ -163,87 +201,210 @@ export class Police {
       const distP = Math.hypot(dx, dz);
       const carSpeed = Math.abs(car.userData.speed || 0);
       const distCar = Math.hypot(playerPos.x - car.position.x, playerPos.z - car.position.z);
-      if (u.dead) continue;
-      if (u.knock) continue;
-      // -- return fire --
-      if (this.wanted >= 2 && this.fx && this.playerRef) {
-        if (o.mode !== 'fire' && carSpeed < 3 && distCar > 5 && distCar < 46) {
-          // take the firing stance at the car's side, stepped
-          // toward the player to hold the 8-14 m band
-          o.mode = 'fire';
-          const side = _side.set(1, 0, 0).applyEuler(car.rotation);
-          o.anchor.copy(car.position).addScaledVector(side, 2.4);
-          const toP = _toP.set(playerPos.x - o.anchor.x, 0, playerPos.z - o.anchor.z);
-          const dA = toP.length();
-          if (dA > 14) o.anchor.addScaledVector(toP.normalize(), Math.min(dA - 11, 6));
-          attachWeapon(person, 'pistol');
+      // v7 bug fix: a knocked officer never got updateKnock called —
+      // he froze mid-pose forever (dead ones standing upright).
+      if (u.knock) {
+        if (o.mode === 'ride' && u.dead) {
+          // shot dead at the wheel: stay seated, slumped; car holds
+          this.placeAtSeat(o);
+          u.upper.rotation.x = 0.35;
+        } else {
+          updateKnock(person, dt);
         }
-        if (o.mode === 'fire') {
-          // abandon the stance if the car rolls away or heat drops
-          if (carSpeed > 6 || distCar > 55) {
-            o.mode = 'heel';
+        if (u.dead) continue;
+        if (u.knock) continue;
+      }
+      if (u.dead) continue;
+      const door = car.userData.door;
+      switch (o.mode) {
+        case 'ride': {
+          this.placeAtSeat(o);
+          if (door) door.rotation.y *= Math.max(0, 1 - dt * 6);
+          if (this.wanted >= 1 && carSpeed < 1.6 && distCar < 30 && playerSpeed < 9) {
+            o.mode = 'exit';
+            o.phaseT = 0;
+            o.exitFrom.copy(person.position);
+            poseStand(person);
+          }
+          break;
+        }
+        case 'exit': {
+          o.phaseT += dt;
+          const k = Math.min(1, o.phaseT / 0.4);
+          _side.set(-1, 0, 0).applyEuler(car.rotation);
+          _target.copy(car.position).addScaledVector(_side, 1.7);
+          _target.y = 0;
+          person.position.lerpVectors(o.exitFrom, _target, k);
+          person.rotation.y = car.rotation.y;
+          if (door) door.rotation.y = Math.sin(k * Math.PI * 0.5) * 1.0;
+          if (k >= 1) { o.mode = 'heel'; o.phaseT = 0; }
+          break;
+        }
+        case 'heel': {
+          if (door) door.rotation.y *= Math.max(0, 1 - dt * 6);
+          // recall: the action moved away — run back to the car
+          if (distCar > 48 || playerSpeed > 9.5) {
+            if (u.brawl) stopBrawl(person);
+            o.mode = 'return'; o.returnTo = 'seat';
+            break;
+          }
+          if (this.wanted >= 2 && this.fx && this.playerRef) {
+            // step out to a firing anchor holding the 8-14 m band
+            o.anchor.copy(person.position);
+            const toP = _toP.set(playerPos.x - o.anchor.x, 0, playerPos.z - o.anchor.z);
+            const dA = toP.length();
+            if (dA > 0.01) {
+              if (dA > 14) o.anchor.addScaledVector(toP.normalize(), Math.min(dA - 11, 7));
+              else if (dA < 8) o.anchor.addScaledVector(toP.normalize(), -(8 - dA));
+            }
+            attachWeapon(person, 'pistol');
+            o.mode = 'toAnchor';
+            break;
+          }
+          // fists at wanted 1 (v6 behaviour): he holds his ground
+          // by the car and only wades in when the player closes to
+          // confrontation distance — v7's first pass started the
+          // brawl at 11 m, so a cop 12 m away charged and landed
+          // punches inside the v6 suite's no-gunfire window. 7 m
+          // sits safely between the two suite geometries (officer
+          // ~10.3-13.7 m off in the no-gunfire pin, ~3.3-6.7 m in
+          // the brawl pin)
+          if (this.wanted === 1 && onFoot && this.playerRef && !this.playerRef.userData.dead) {
+            if (!u.brawl && distP < 7) {
+              startBrawl(person, this.playerRef, () => {
+                if (this.onPlayerShot) this.onPlayerShot(3 + this.rand() * 2);
+              });
+            }
+            if (u.brawl) {
+              if (distCar > 16) {
+                stopBrawl(person);
+                o.mode = 'return'; o.returnTo = 'door';
+              } else {
+                updateBrawl(person, dt, this.rand);
+              }
+              break;
+            }
+          } else if (u.brawl) stopBrawl(person);
+          // stand at the driver-side door, face the player
+          _side.set(-1, 0, 0).applyEuler(car.rotation);
+          person.position.copy(car.position).addScaledVector(_side, 1.7);
+          person.position.y = 0;
+          person.rotation.y = Math.atan2(dx, dz);
+          u.idle();
+          break;
+        }
+        case 'toAnchor': {
+          if (this.wanted < 2 || distP > 42) {
             detachWeapon(person);
-          } else {
-            person.position.copy(o.anchor);
-            person.rotation.y = Math.atan2(dx, dz);
-            u.armR.rotation.x = -1.35;   // pistol aim pose
-            u.armL.rotation.x = -0.4;
-            u.legL.rotation.x *= 0.7; u.legR.rotation.x *= 0.7;
-            // burst state machine
-            if (o.burstLeft > 0) {
-              o.burstT -= dt;
-              if (o.burstT <= 0) {
-                o.burstT = 0.13;
-                o.burstLeft -= 1;
-                const from = _from.set(
-                  person.position.x + Math.sin(person.rotation.y) * 0.35,
-                  1.38,
-                  person.position.z + Math.cos(person.rotation.y) * 0.35
-                );
-                const target = _target.set(playerPos.x, 1.05, playerPos.z);
-                const los = !this.fx._hasLoS || this.fx._hasLoS(from, target);
-                if (los && distP < 48) {
-                  const res = this.fx.fireNPC(from, target, o.burstAcc);
-                  o.burstAcc = Math.min(0.82, o.burstAcc + 0.06);
-                  if (res.hit && this.onPlayerShot) {
-                    this.onPlayerShot(4 + this.rand() * 4);   // 4-8 HP
-                  }
+            o.mode = 'return';
+            o.returnTo = this.wanted < 2 ? 'seat' : 'door';
+            break;
+          }
+          const ax = o.anchor.x - person.position.x;
+          const az = o.anchor.z - person.position.z;
+          const d = Math.hypot(ax, az);
+          if (d < 0.3) { o.mode = 'fire'; break; }
+          const sp = 4.6;
+          person.position.x += (ax / d) * Math.min(d, sp * dt);
+          person.position.z += (az / d) * Math.min(d, sp * dt);
+          person.rotation.y = Math.atan2(ax, az);
+          o.phase += dt * sp * 1.9;
+          u.walk(o.phase, 0.5, 0.06);
+          person.position.y = 0;   // walk() bobs y; officers stay grounded
+          break;
+        }
+        case 'fire': {
+          // abandon the stance if the player escapes or heat drops
+          if (this.wanted < 2 || distP > 42) {
+            detachWeapon(person);
+            o.mode = 'return';
+            o.returnTo = this.wanted < 2 ? 'seat' : 'door';
+            break;
+          }
+          person.position.copy(o.anchor);
+          person.rotation.y = Math.atan2(dx, dz);
+          u.armR.rotation.x = -1.35;   // pistol aim pose
+          u.armL.rotation.x = -0.4;
+          u.legL.rotation.x *= 0.7; u.legR.rotation.x *= 0.7;
+          // burst state machine (v6 ballistics, unchanged)
+          if (o.burstLeft > 0) {
+            o.burstT -= dt;
+            if (o.burstT <= 0) {
+              o.burstT = 0.13;
+              o.burstLeft -= 1;
+              const from = _from.set(
+                person.position.x + Math.sin(person.rotation.y) * 0.35,
+                1.38,
+                person.position.z + Math.cos(person.rotation.y) * 0.35
+              );
+              const target = _target.set(playerPos.x, 1.05, playerPos.z);
+              const los = !this.fx._hasLoS || this.fx._hasLoS(from, target);
+              if (los && distP < 48) {
+                const res = this.fx.fireNPC(from, target, o.burstAcc);
+                o.burstAcc = Math.min(0.82, o.burstAcc + 0.06);
+                if (res.hit && this.onPlayerShot) {
+                  this.onPlayerShot(4 + this.rand() * 4);   // 4-8 HP
                 }
               }
-            } else {
-              o.pauseT -= dt;
-              if (o.pauseT <= 0) {
-                o.burstLeft = 2 + Math.floor(this.rand() * 3);   // 2-4 rounds
-                o.burstT = 0;
-                o.burstAcc = 0.55;
-                o.pauseT = 0.9 + this.rand() * 0.7;              // 0.9-1.6 s
-              }
             }
-            continue;
+          } else {
+            o.pauseT -= dt;
+            if (o.pauseT <= 0) {
+              o.burstLeft = 2 + Math.floor(this.rand() * 3);   // 2-4 rounds
+              o.burstT = 0;
+              o.burstAcc = 0.55;
+              o.pauseT = 0.9 + this.rand() * 0.7;              // 0.9-1.6 s
+            }
           }
+          break;
         }
-      } else if (o.mode === 'fire') {
-        o.mode = 'heel';
-        detachWeapon(person);
+        case 'return': {
+          if (u.brawl) stopBrawl(person);
+          _side.set(-1, 0, 0).applyEuler(car.rotation);
+          _target.copy(car.position).addScaledVector(_side, 1.7);
+          const ax = _target.x - person.position.x;
+          const az = _target.z - person.position.z;
+          const d = Math.hypot(ax, az);
+          if (d < 0.35) {
+            if (o.returnTo === 'seat') {
+              o.mode = 'enter';
+              o.phaseT = 0;
+              o.exitFrom.copy(person.position);
+            } else {
+              o.mode = 'heel';
+            }
+            break;
+          }
+          const sp = 6.5;
+          person.position.x += (ax / d) * Math.min(d, sp * dt);
+          person.position.z += (az / d) * Math.min(d, sp * dt);
+          person.rotation.y = Math.atan2(ax, az);
+          o.phase += dt * sp * 1.9;
+          u.walk(o.phase, 0.62, 0.12);
+          person.position.y = 0;
+          break;
+        }
+        case 'enter': {
+          o.phaseT += dt;
+          const k = Math.min(1, o.phaseT / 0.35);
+          _side.set(-0.42, -0.25, 0.05).applyEuler(car.rotation);
+          _target.copy(car.position).add(_side);
+          person.position.lerpVectors(o.exitFrom, _target, k);
+          person.rotation.y = car.rotation.y;
+          if (door) door.rotation.y = Math.sin(k * Math.PI * 0.5) * 1.0;
+          if (k >= 1) {
+            o.mode = 'ride';
+            poseSeated(person);
+            if (door) door.rotation.y = 0;
+          }
+          break;
+        }
+        default: {
+          o.mode = 'ride';
+          this.placeAtSeat(o);
+          poseSeated(person);
+        }
       }
-      // -- fists at wanted 1 --
-      if (this.wanted === 1 && onFoot && this.playerRef && !this.playerRef.userData.dead) {
-        if (!u.brawl && carSpeed < 2 && distCar < 8 && distP < 9) {
-          startBrawl(person, this.playerRef, () => {
-            if (this.onPlayerShot) this.onPlayerShot(3 + this.rand() * 2);
-          });
-        }
-        if (u.brawl) {
-          if (distCar > 16 || this.wanted !== 1) stopBrawl(person);
-          else { updateBrawl(person, dt, this.rand); continue; }
-        }
-      } else if (u.brawl) stopBrawl(person);
-      // -- default: heel the car, face the player --
-      const side = _side.set(1, 0, 0).applyEuler(car.rotation);
-      person.position.copy(car.position).addScaledVector(side, 2.4);
-      person.rotation.y = Math.atan2(
-        playerPos.x - person.position.x, playerPos.z - person.position.z);
-      u.idle();
     }
     return this.bust >= 100;
   }

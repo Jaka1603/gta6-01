@@ -215,6 +215,23 @@ export function makePerson(shirt, pants, skin = 0xd9a066, opts = {}) {
 // friction, topples forward over ~0.18 s, lies still, then climbs
 // back up. updateKnock advances the state; it returns true while
 // the figure is down (owners skip their normal movement then).
+// v7: seated-driver pose for vehicle occupants (police ride mode).
+// Legs fold forward and hide — behind a real door panel they would
+// not be visible anyway, and shown legs clip through the body shell.
+// Hands come up to the wheel. poseStand restores the neutral pose.
+export function poseSeated(person) {
+  const u = person.userData;
+  u.legL.rotation.x = -1.45; u.legR.rotation.x = -1.3;
+  u.armL.rotation.x = -0.6; u.armR.rotation.x = -0.85;
+  u.legL.visible = false; u.legR.visible = false;
+}
+export function poseStand(person) {
+  const u = person.userData;
+  u.legL.visible = true; u.legR.visible = true;
+  u.legL.rotation.x = 0; u.legR.rotation.x = 0;
+  u.armL.rotation.x = 0; u.armR.rotation.x = 0;
+}
+
 export function knockPerson(person, vx, vz, downTime = 1.15) {
   const u = person.userData;
   if (u.knock) return false;
