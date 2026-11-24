@@ -382,8 +382,23 @@ export class Police {
             const toP = _toP.set(playerPos.x - o.anchor.x, 0, playerPos.z - o.anchor.z);
             const dA = toP.length();
             if (dA > 0.01) {
+              const ux = toP.x / dA, uz = toP.z / dA;
               if (dA > 14) o.anchor.addScaledVector(toP.normalize(), Math.min(dA - 11, 7));
               else if (dA < 8) o.anchor.addScaledVector(toP.normalize(), -(8 - dA));
+              // v9: step OUT from behind his own car. The anchor
+              // used to stay on the car->player line, so the
+              // sedan's cabin ate every bullet the player fired
+              // at him (measured: car body 13.9 m, officer
+              // 15.5 m on the same ray) while his return fire
+              // travelled free — a one-way gunfight. He now
+              // takes the firing position BESIDE the car: same
+              // band, a clear line both ways.
+              const relX = o.anchor.x - o.car.position.x;
+              const relZ = o.anchor.z - o.car.position.z;
+              const cross = relX * uz - relZ * ux;
+              const sgn = cross >= 0 ? 1 : -1;
+              o.anchor.x += uz * sgn * 2.3;
+              o.anchor.z += -ux * sgn * 2.3;
             }
             attachWeapon(person, 'pistol');
             o.mode = 'toAnchor';
@@ -454,6 +469,13 @@ export class Police {
           u.armR.rotation.x = -1.35;   // pistol aim pose
           u.armL.rotation.x = -0.4;
           u.legL.rotation.x *= 0.7; u.legR.rotation.x *= 0.7;
+          // v9: being shot REELS the officer — a visible flinch
+          // and a brief pause in his burst while he recovers
+          if (u.staggerT > 0) {
+            u.staggerT -= dt;
+            u.upper.rotation.x = -0.2;
+            o.burstT = Math.max(o.burstT, 0.12);
+          } else u.upper.rotation.x *= 0.8;
           // burst state machine (v6 ballistics, unchanged)
           if (o.burstLeft > 0) {
             o.burstT -= dt;

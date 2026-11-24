@@ -16,7 +16,7 @@ const THREE = window.THREE;
 import { CFG, PALETTE, SCALE, rng, clamp, lerp, TAU } from './config.js';
 import { buildWorld, roadCoord, nearestRoadCoord, onRoad, worldInfo } from './world.js';
 import { Traffic, spawnParked, heroCar, makeCar, setBrake, rollWheels, steerWheels, carPersonHit, damageVehicle, damageStage, setCarWreck, restoreCar } from './vehicles.js';
-import { Pedestrians, heroPerson, attachWeapon, updateKnock, hurtPerson, startBrawl, stopBrawl, updateBrawl, makePerson, makeWeaponMesh } from './people.js';
+import { Pedestrians, heroPerson, attachWeapon, updateKnock, hurtPerson, startBrawl, stopBrawl, updateBrawl, makePerson, makeWeaponMesh, updateHitFlashes } from './people.js';
 import { Police } from './police.js';
 import { Missions, MISSION_DEFS } from './missions.js';
 import { Combat, Health, WEAPONS, WEAPON_ORDER } from './combat.js';
@@ -454,6 +454,8 @@ const state = {
   footVel: { x: 0, z: 0 },   // acceleration-based on-foot velocity (D)
   groundY: 0,                // v7: the ground height under the player (pier deck 1.5, bar slab 0.18, else 0) — tracked separately because walk()/idle() own position.y for the gait bob
   firing: false,             // trigger held (auto weapons keep firing)
+  lastShotT: -9,             // v9: sim time of the last shot fired (aim camera)
+  aimBlend: 0,               // v9: 0..1 over-shoulder aim camera blend
   punchT: 0,                 // player punch swing timer (M)
   gangAggroT: 0,             // seconds of gang hostility left
   district: '',              // last district splashed (N)
@@ -1132,6 +1134,12 @@ function playerShoot() {
   ], (obj, point, st) => {
     if (obj.userData && obj.userData.isPerson) {
       const res = hurtPerson(obj, st.dmg, player.position.x, player.position.z);
+      // v9 hit feedback: the shot must CONFIRM itself — hitmarker
+      // on the crosshair, a hit tick, and a heavier beat + a
+      // breath of hitstop when the target goes down
+      hud.hitmark(res === 'dead');
+      audio.play(res === 'dead' ? 'kill' : 'hit');
+      if (res === 'dead') { addHitstop(0.05); addTrauma(0.12); }
       peds.fleeFrom(player.position.x, player.position.z, 20);
       police.addWanted(1);
       if (gangMembers.includes(obj)) state.gangAggroT = 25;
@@ -1151,7 +1159,7 @@ function playerShoot() {
       player.position.z > gt.z0 - 25 && player.position.z < gt.z1 + 25) {
     state.gangAggroT = 25;
   }
-  if (res === 'hit' || res === 'miss') syncHUD();
+  if (res === 'hit' || res === 'miss') { state.lastShotT = state.time; syncHUD(); }
 }
 function reloadPistol() {
   if (state.mode !== 'playing' || combat.weapon === 'fists') return;
@@ -1255,7 +1263,7 @@ addEventListener('mousedown', (e) => {
 });
 addEventListener('mousemove', (e) => {
   if (!mouseDrag) return;
-  state.camOffsetTarget += (e.clientX - mouseDrag.x) * 0.0052;
+  state.camOffsetTarget += (e.clientX - mouseDrag.x) * 0.0046;
   mouseDrag.x = e.clientX;
   mouseDrag.y = e.clientY;
   mouseDrag.moved = Math.max(mouseDrag.moved,
@@ -1284,8 +1292,8 @@ addEventListener('resize', () => {
 // the same action functions as the keyboard. Dragging the right
 // half of the screen orbits the camera into state.camOffsetTarget,
 // which updateCamera damps toward — no jitter, no snapping.
-const STICK_DEAD = 0.10;   // dead zone, as a fraction of full travel (v7: tighter)
-const STICK_TRAVEL = 70;   // px of thumb travel = full deflection
+const STICK_DEAD = 0.13;   // dead zone, as a fraction of full travel (v9: a calmer centre)
+const STICK_TRAVEL = 78;   // px of thumb travel = full deflection (v9: bigger radius)
 let touchTapAt = 0;
 let stickPointer = null;
 let stickOrigin = { x: 0, y: 0 };
@@ -1339,7 +1347,7 @@ function stickMove(e) {
   state.stickVec.mag = mag;
   // knob follows the thumb, clamped so it never leaves the base
   knobEl.style.transform =
-    'translate(-50%, -50%) translate(' + (dx * 39) + 'px, ' + (dy * 39) + 'px)';
+    'translate(-50%, -50%) translate(' + (dx * 46) + 'px, ' + (dy * 46) + 'px)';
   // derived digital keys (kept for readers/tests of state.keys)
   setKey('KeyW', dy < -STICK_DEAD);
   setKey('KeyS', dy > STICK_DEAD);
@@ -1437,7 +1445,9 @@ addEventListener('pointerdown', (e) => {
 });
 addEventListener('pointermove', (e) => {
   if (e.pointerId !== camPointer) return;
-  state.camOffsetTarget += (e.clientX - camLastX) * 0.0055;
+  // v9: touch camera drag calmed (0.0055 -> 0.0039 rad/px) — the
+  // view no longer whips around on a short thumb swipe
+  state.camOffsetTarget += (e.clientX - camLastX) * 0.0039;
   camLastX = e.clientX;
 });
 const camDragEnd = (e) => { if (e.pointerId === camPointer) camPointer = null; };
@@ -1846,6 +1856,17 @@ function updatePlayer(dt) {
     while (dh < -Math.PI) dh += TAU;
     state.heading += clamp(dh, -12 * dt, 12 * dt);
   }
+  // v9: while a gun is out and Dario is firing (or just fired),
+  // he faces the AIM — the camera's forward — not his walk
+  // direction, so body, muzzle and crosshair agree (the top-1's
+  // over-shoulder stance). Snappier than the walk turn (20 rad/s).
+  if (combat.weapon !== 'fists' && (state.firing || state.time - state.lastShotT < 0.6)) {
+    let dh = (state.camYaw + Math.PI) - state.heading;
+    while (dh > Math.PI) dh -= TAU;
+    while (dh < -Math.PI) dh += TAU;
+    state.heading += clamp(dh, -20 * dt, 20 * dt);
+    player.rotation.y = state.heading;
+  }
   // v6 (brief D): movement is VELOCITY-based now — acceleration and
   // damping curves instead of teleport-speed. The stick gets an
   // expo curve (fine control at small deflections), stops are
@@ -1937,10 +1958,12 @@ function updateCar(dt) {
   if (stickDriving) throttle = inp.ay;
   else {
     if (inp.ay > 0) throttle += 1;
-    if (inp.ay < 0) throttle -= 0.7;
+    // v9: S while rolling forward is a BRAKE first (stronger),
+    // reverse only once nearly stopped — one pedal, no lurch
+    if (inp.ay < 0) throttle -= (state.carSpeed > 3 ? 1.15 : 0.7);
   }
   const braking = inp.brake;
-  if (braking) throttle = -1.4;
+  if (braking) throttle = -1.6;
   // v7 controls: throttle is SMOOTHED (no digital on/off lurch when
   // feathering the gas) — but the brake pedal, S-braking at speed
   // and the exit emergency stop stay instant.
@@ -1951,6 +1974,10 @@ function updateCar(dt) {
     throttleSm += clamp(throttle - throttleSm, -tRate * dt, tRate * dt);
   }
   throttle = throttleSm;
+  // v9: a gentler launch curve — partial throttle answers softly,
+  // full throttle still gets everything (kills the on/off lurch
+  // Jaka felt pulling away)
+  if (throttle > 0) throttle = throttle * (0.62 + 0.38 * throttle);
   // v5 amendment: ACT at speed does not eject — it stands on the
   // brakes, and the exit sequence starts once nearly stopped
   if (state.exitPending) {
@@ -1978,10 +2005,16 @@ function updateCar(dt) {
   if (stickDriving) steer = -inp.ax * (0.55 + 0.45 * Math.abs(inp.ax));
   else steer = -inp.ax;
   if (state.exitPending) steer = 0;
+  // v9 (Jaka: "kontrol sulit dikendalikan"): the available lock
+  // SHRINKS with speed — full lock for parking, ~60% on the
+  // highway — so a held key can no longer saw the car into a
+  // zigzag at pace; the yaw fade below deepens the same curve.
+  steer *= 1 - 0.38 * Math.abs(state.carSpeed) / Math.max(1, u.maxSpeed);
   // v7 controls: the applied steer is smoothed — fast attack, faster
   // release — which kills the digital twitch Jaka felt without
   // adding lag; the same value steers the visible front wheels.
-  const sRate = Math.abs(steer) > Math.abs(steerSm) ? 8 : 11;
+  // v9: the rates soften a touch (7 / 9) for the same reason.
+  const sRate = Math.abs(steer) > Math.abs(steerSm) ? 7 : 9;
   steerSm += clamp(steer - steerSm, -sRate * dt, sRate * dt);
   steer = steerSm;
   const spd = state.carSpeed;
@@ -1990,8 +2023,10 @@ function updateCar(dt) {
     // planted, not twitchy. v7: more authority where it was mushy —
     // the low-speed floor is 0.5 (was 0.3) reached by 9 m/s (was
     // 12), and the top-speed fade is gentler (0.15, was 0.25).
+    // v9: the top-speed fade deepens (0.35) — planted at pace,
+    // still eager around town.
     car.rotation.y += steer * CFG.carTurn * dt *
-      clamp(Math.abs(spd) / 9, 0.5, 1) * (1 - 0.15 * Math.abs(spd) / Math.max(1, u.maxSpeed)) *
+      clamp(Math.abs(spd) / 9, 0.5, 1) * (1 - 0.35 * Math.abs(spd) / Math.max(1, u.maxSpeed)) *
       Math.sign(spd);
   }
   // v7 realism: body roll into corners — pure local Z roll, so the
@@ -2186,12 +2221,21 @@ function updateCamera(dt) {
   const dragging = camPointer !== null || mouseDrag !== null;
   const moving = state.inCar ? Math.abs(state.carSpeed) > 3 : state.footSpeed > 0.5;
   if (moving && !dragging && !state.transition) {
-    state.camOffsetTarget *= Math.exp(-0.5 * dt);
+    state.camOffsetTarget *= Math.exp(-0.35 * dt);   // v9: gentler auto-centre
     if (Math.abs(state.camOffsetTarget) < 0.002) state.camOffsetTarget = 0;
   }
   state.camOffset += (state.camOffsetTarget - state.camOffset) * (1 - Math.exp(-9 * dt));
-  const dist = state.inCar ? 11 : 6.5;
-  const height = state.inCar ? 4.5 : 3.0;
+  // v9 over-shoulder aim camera (the top-1's on-foot framing):
+  // while Dario is armed and firing — or for a beat after his
+  // last shot — the camera pulls in close over his right
+  // shoulder, so crosshair, muzzle and target share one line;
+  // it eases back to the follow distance afterwards.
+  const aiming = !state.inCar && combat.weapon !== 'fists' &&
+    (state.firing || state.time - state.lastShotT < 1.1);
+  state.aimBlend += clamp((aiming ? 1 : 0) - state.aimBlend, -dt * 2.6, dt * 6);
+  const ab = state.aimBlend;
+  const dist = state.inCar ? 11 : lerp(6.5, 3.6, ab);
+  const height = state.inCar ? 4.5 : lerp(3.0, 2.05, ab);
   if (state.transition) {
     // enter/exit sequence: glide around the car being used, keep
     // the current yaw (no snap), pull to chase distance on entry
@@ -2213,18 +2257,25 @@ function updateCamera(dt) {
   while (dy < -Math.PI) dy += TAU;
   // v7 controls: on foot the camera re-centres faster (5.4 — tighter
   // follow, less swim); driving keeps the calmer 4.2
-  state.camYaw += dy * (1 - Math.exp(-(state.inCar ? 4.2 : 5.4) * dt));
-  const cx = focus.x + Math.sin(state.camYaw) * dist;
-  const cz = focus.z + Math.cos(state.camYaw) * dist;
+  // v9: both eased a touch calmer (3.6 driving) — the chase cam
+  // settles behind the car instead of hunting around it
+  state.camYaw += dy * (1 - Math.exp(-(state.inCar ? 3.6 : 5.2) * dt));
+  // v9: the shoulder shift — camera AND look target slide right
+  // together, so the view direction is unchanged, only framed
+  // over the shoulder while aiming
+  const shX = Math.cos(state.camYaw) * 0.85 * ab;
+  const shZ = -Math.sin(state.camYaw) * 0.85 * ab;
+  const cx = focus.x + Math.sin(state.camYaw) * dist + shX;
+  const cz = focus.z + Math.cos(state.camYaw) * dist + shZ;
   // v6: spring-damped position (no lerp pops when the focus
   // teleports between foot and car — the spring absorbs it)
   smoothDampVec(camera.position, _camV.set(cx, height, cz), camVel,
-    state.inCar ? 0.34 : 0.26, dt);
+    state.inCar ? 0.42 : 0.26, dt);
   // v3 audit: keep the chase camera out of buildings (it used to
   // clip inside facades whenever the player backed against a wall)
   collideBuildings(camera.position, 0.7);
   // v6: velocity lookahead — the look target leans ahead of travel
-  let lx = focus.x, lz = focus.z;
+  let lx = focus.x + shX, lz = focus.z + shZ;
   if (state.inCar) {
     lx += Math.sin(car.rotation.y) * clamp(state.carSpeed * 0.32, -5, 7);
     lz += Math.cos(car.rotation.y) * clamp(state.carSpeed * 0.32, -5, 7);
@@ -2262,6 +2313,19 @@ const _gangFrom = new THREE.Vector3();
 const _gangTo = new THREE.Vector3();
 function updateGang(dt) {
   if (state.gangAggroT > 0) state.gangAggroT -= dt;
+  // v9: THE CHASE runs through the rival crew's turf — on foot
+  // in their streets the crew engages Dario for real (riflemen
+  // return fire, the rest close in), so the mission carries a
+  // genuine two-way shootout, not only rams. In a car the old
+  // provocation rules stand unchanged.
+  if (missions.active && missions.current && missions.current.chase && !state.inCar) {
+    const gt = worldInfo.gangTurf;
+    const pp0 = player.position;
+    if (gt && pp0.x > gt.x0 - 10 && pp0.x < gt.x1 + 10 &&
+        pp0.z > gt.z0 - 10 && pp0.z < gt.z1 + 10) {
+      state.gangAggroT = Math.max(state.gangAggroT, 1.5);
+    }
+  }
   const aggro = state.gangAggroT > 0 && state.mode === 'playing';
   const pp = state.inCar ? car.position : player.position;
   for (const m of gangMembers) {
@@ -2275,6 +2339,13 @@ function updateGang(dt) {
     }
     if (u.rifle && d > 6 && d < 45 && combat._hasLoS(m.position, pp)) {
       if (u.brawl) stopBrawl(m);
+      // v9: a rifleman who just took a bullet reels before firing
+      if (u.staggerT > 0) {
+        u.staggerT -= dt;
+        u.upper.rotation.x = -0.2;
+        continue;
+      }
+      u.upper.rotation.x *= 0.8;
       u.fireT = (u.fireT || 0) - dt;
       m.rotation.y = Math.atan2(pp.x - m.position.x, pp.z - m.position.z);
       u.armR.rotation.x = -1.45;
@@ -2534,7 +2605,7 @@ function stageFlockInView(flock, camPos, viewDir, dist, height) {
 function applyShot() {
   if (!SHOT) return;
   // deterministic scene for screenshots
-  if (SHOT === 'title' || SHOT === 'v8title') {
+  if (SHOT === 'title' || SHOT === 'v8title' || SHOT === 'v9title') {
     // seed a save so CONTINUE shows (spec: title lists New Game / Continue)
     saveData = {
       cash: 2450, missionIndex: 2, missionsDone: 2,
@@ -2542,7 +2613,7 @@ function applyShot() {
       rankRp: 1450, stats: defaultStats(), medals: { 1: 'G', 2: 'S' },
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(saveData)); } catch {}
-    if (SHOT === 'v8title') {
+    if (SHOT === 'v8title' || SHOT === 'v9title') {
       // a second, earlier slot so the slot cards read like a life
       try {
         localStorage.setItem(SAVE_KEY + '-2', JSON.stringify({
@@ -2863,7 +2934,7 @@ function applyShot() {
     shotCamTarget = new THREE.Vector3(cx - 1, 0.8, cz + 2);
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
-  } else if (SHOT === 'v8chase') {
+  } else if (SHOT === 'v8chase' || SHOT === 'v9chase') {
     // v8 dossier cover: DAYTIME chase on the beachfront avenue —
     // wanted 5, KITE-1 overhead, the full named HUD live, THE
     // CHASE at stage 2/3 with one ram already landed.
@@ -2947,7 +3018,75 @@ function applyShot() {
     camera.position.copy(shotCamPos);
     camera.lookAt(shotCamTarget);
     state.camYaw = state.heading + Math.PI;
-  } else if (SHOT === 'v8stats') {
+  } else if (SHOT === 'v9fight') {
+    // v9 dossier: NIGHT SHOOTOUT in the Greens — the new gunplay
+    // in one frame. Dario over the shoulder, pistol up; a rival
+    // rifleman 8.5 m out caught mid-reel by a landed hit (red
+    // flash + stagger pinned for the capture), his crewman down
+    // beside him, a third returning fire from deeper in, the
+    // kill hitmarker still on the crosshair, tracers frozen
+    // mid-flight, a police sedan rolling in behind.
+    state.inCar = false;
+    const gt = worldInfo.gangTurf;
+    const cx = (gt.x0 + gt.x1) / 2, cz = (gt.z0 + gt.z1) / 2;
+    player.position.set(cx, 0, cz + 10);
+    state.heading = Math.PI;   // face -z, into the turf
+    player.rotation.y = state.heading;
+    state.camYaw = state.heading + Math.PI;
+    missions.start(2);
+    state.cash = 1740;
+    state.missionsDone = 2;
+    state.rankRp = 1980;
+    state.clockMin = 1270;   // 21:10 — full night
+    health.hp = 76;
+    health.armour = 20;
+    combat.setWeapon('pistol');
+    state.gangAggroT = 25;
+    const px = player.position.x, pz = player.position.z;
+    // the target: a rifleman, shot, reeling, lit red by the hit
+    const t0 = gangMembers.find((m) => m.userData.rifle) || gangMembers[0];
+    t0.position.set(px + 1.2, 0, pz - 8.5);
+    t0.rotation.y = Math.atan2(px - t0.position.x, pz - t0.position.z);
+    hurtPerson(t0, 34, px, pz);
+    t0.userData.flashT = 5;
+    t0.userData.staggerT = 5;
+    // his crewman: already down
+    const t1 = gangMembers.find((m) => m !== t0);
+    t1.position.set(px - 2.6, 0, pz - 6.2);
+    hurtPerson(t1, 999, px, pz);
+    // a third rifleman deeper in, returning fire
+    const t2 = gangMembers.find((m) => m !== t0 && m !== t1);
+    if (t2) {
+      t2.position.set(px - 4.5, 0, pz - 14);
+      t2.rotation.y = Math.atan2(px - t2.position.x, pz - t2.position.z);
+    }
+    // tracers, frozen for the frame: Dario's landed round and
+    // the third man's reply cracking past
+    const muzzle = new THREE.Vector3(px + 0.3, 1.38, pz - 0.4);
+    const chest = new THREE.Vector3(t0.position.x, 1.05, t0.position.z);
+    combat.tracers.fire(muzzle, chest, 0xffe9b0);
+    if (t2) {
+      combat.tracers.fire(
+        new THREE.Vector3(t2.position.x + 0.3, 1.38, t2.position.z + 0.4),
+        new THREE.Vector3(px - 0.8, 1.3, pz - 3), 0xff9a7a);
+    }
+    for (const s of combat.tracers.pool) if (s.life > 0) s.life = 5;
+    combat.flash.fire(muzzle, new THREE.Vector3(0, 0, -1));
+    // the kill marker, pinned (its auto-hide timer cleared)
+    hud.hitmark(true);
+    clearTimeout(hud._hmT);
+    state.aimBlend = 1;
+    police.setWanted(2);
+    if (police.cars[0]) {
+      police.cars[0].position.set(px + 7, 0, pz + 13);
+      police.cars[0].rotation.y = Math.PI + 0.4;
+    }
+    for (const o of police.officers) o.person.visible = false;
+    shotCamPos = new THREE.Vector3(px + 0.85, 2.05, pz + 3.6);
+    shotCamTarget = new THREE.Vector3(px + 0.85, 1.25, pz - 8);
+    camera.position.copy(shotCamPos);
+    camera.lookAt(shotCamTarget);
+  } else if (SHOT === 'v8stats' || SHOT === 'v9stats') {
     // v8 dossier: the pause STATS tab over a mid-career save —
     // completion ring, checklist, medals, career numbers.
     state.cash = 3120;
@@ -3058,6 +3197,7 @@ function animate() {
     cat.update(dt);
     updateChaseTarget(dt);
     combat.update(dt);
+    updateHitFlashes(dt);   // v9: red hit-flash decay on shot figures
     // v6 systems
     updateGang(dt);
     updateCourier(dt);
@@ -3140,6 +3280,8 @@ function animate() {
       hud.setBust(police.bust / 100);
       // v6: lock-on candidates = gang + officers, refreshed at HUD rate
       combat.hostiles = gangMembers.concat(police.officers.map((o) => o.person));
+      // v9: the capsule aim assist tests EVERY shootable person
+      combat.persons = peds.peds.concat(gangMembers, police.officers.map((o) => o.person));
       updateHeadlights();
       // v8 adaptive music: calm on foot, engaged driving, danger
       // at wanted >= 2 — layers crossfade on the audio side

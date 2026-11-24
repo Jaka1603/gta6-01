@@ -277,6 +277,8 @@ export class AudioSys {
         this.blip(880, 0.18); setTimeout(() => this.blip(1318, 0.25), 90);
         break;
       case 'shot': this.noise(0.12, 0.4, 2500); break;
+      case 'hit': this.blip(1500, 0.05, 'square', 0.10); this.noise(0.05, 0.14, 3200); break;
+      case 'kill': this.blip(280, 0.14, 'square', 0.16); this.noise(0.12, 0.22, 700); break;
       case 'punch': this.noise(0.08, 0.25, 500); break;
       case 'dryfire': this.blip(180, 0.06, 'square', 0.12); break;
       case 'cash': this.blip(1320, 0.12); setTimeout(() => this.blip(1760, 0.2), 100); break;

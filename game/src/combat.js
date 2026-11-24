@@ -7,8 +7,11 @@
 //            the owner's 1 m tolerance, inside range + line-of-sight.
 //            A red lock ring rides the target; the lock drops after
 //            0.3 s out of tolerance / line-of-sight.
-//   MANUAL — shots go exactly where the crosshair points (camera
-//            centre), with at most 2 degrees of magnetism.
+//   MANUAL — shots go where the crosshair points (camera centre);
+//            v9: a capsule aim assist (see _personCandidate) makes
+//            body-aimed shots land on ANY person at any range —
+//            the old hostiles-only 2-degree magnetism left close-
+//            range and pedestrian targets effectively unhittable.
 // Melee now deals real damage (brief M): stagger, knockdown, death
 // are applied by main via hurtPerson. NPC return fire (police, gang)
 // shares fireNPC so every bullet in the game draws a tracer.
@@ -22,8 +25,8 @@ export const WEAPONS = {
   pistol:  { name: 'PISTOL',       dmg: 34, cd: 0.28, range: 120, pellets: 1, spread: 0.004, mag: 12, reserve: 96,  auto: false },
   heavy:   { name: 'HEAVY PISTOL', dmg: 68, cd: 0.52, range: 130, pellets: 1, spread: 0.003, mag: 7,  reserve: 42,  auto: false },
   smg:     { name: 'SMG',          dmg: 16, cd: 0.095, range: 90, pellets: 1, spread: 0.02, mag: 30, reserve: 180, auto: true },
-  shotgun: { name: 'SHOTGUN',      dmg: 11, cd: 0.85, range: 38,  pellets: 7, spread: 0.075, mag: 6,  reserve: 36,  auto: false },
-  rifle:   { name: 'RIFLE',        dmg: 46, cd: 0.16, range: 170, pellets: 1, spread: 0.006, mag: 24, reserve: 120, auto: true },
+  shotgun: { name: 'SHOTGUN',      dmg: 15, cd: 0.85, range: 38,  pellets: 7, spread: 0.075, mag: 6,  reserve: 36,  auto: false },
+  rifle:   { name: 'RIFLE',        dmg: 50, cd: 0.16, range: 170, pellets: 1, spread: 0.006, mag: 24, reserve: 120, auto: true },
 };
 export const WEAPON_ORDER = ['fists', 'pistol', 'heavy', 'smg', 'shotgun', 'rifle'];
 
@@ -46,6 +49,9 @@ export class Combat {
     this.lockTarget = null;    // figure group locked by AUTO aim
     this.lockLostT = 0;
     this.hostiles = [];        // figures AUTO may lock / magnetism bends to
+    this.persons = [];         // v9: EVERY shootable figure (peds, gang,
+                               // officers) — the capsule aim assist below
+                               // tests all of them, not just hostiles
     this.occluders = [];       // building meshes for line-of-sight rays
     this.raycaster = new THREE.Raycaster();
     this.flash = new MuzzleFlash(scene);
@@ -182,6 +188,38 @@ export class Combat {
     if (perp > 1.0) return null;
     return { fig, t, perp };
   }
+  // --- v9 capsule aim assist (Jaka: "damage tembakan tidak ada") --
+  // Measured root cause (probe-v9-damage): the converged TPS ray
+  // passes 1.99 m high at a target 3.5 m away and 1.84 m at 5 m —
+  // clean over a 1.81 m figure's head — and only enters the torso
+  // band around 8-13 m. Pedestrians had NO magnetism at all (that
+  // was hostiles-only), so at conversational range a centre-mass
+  // aim hit literally nothing, and with no hit feedback the game
+  // read as "bullets do no damage". The fix is the mobile-shooter
+  // standard: treat every person as a vertical CAPSULE (axis =
+  // the figure's position, radius 0.55 m, body band y -0.35..2.35
+  // along the shot ray) and test the shot ray against the capsule
+  // analytically. Horizontal aim is what the player controls (the
+  // follow rig fixes the pitch), so the test is horizontal
+  // perpendicular distance + a generous vertical band — a shot
+  // aimed at the body lands on the body at ANY range, while a
+  // shot aimed 4 m wide still misses (the v6 negative case).
+  _personCandidate(origin, dir, fig, range) {
+    const u = fig.userData;
+    if (u.dead || u.knock) return null;
+    const dxz = Math.hypot(dir.x, dir.z);
+    if (dxz < 0.05) return null;
+    const ux = dir.x / dxz, uz = dir.z / dxz;
+    const vx = fig.position.x - origin.x, vz = fig.position.z - origin.z;
+    const tH = vx * ux + vz * uz;                    // horizontal range
+    if (tH < 0.6 || tH > range) return null;
+    const perpH = Math.abs(vx * uz - vz * ux);       // lateral offset
+    if (perpH > 0.55) return null;
+    const s = tH / dxz;                              // 3D ray parameter
+    const rayY = origin.y + dir.y * s;
+    if (rayY < -0.35 || rayY > 2.35) return null;    // body band
+    return { fig, t: s, perp: perpH };
+  }
   _hasLoS(from, to) {
     if (!this.occluders.length) return true;
     const dir = this._tmp.subVectors(to, from);
@@ -312,25 +350,36 @@ export class Combat {
       const hits = this.raycaster.intersectObjects(targets, true);
       let hitObj = null, hitPoint = null, hitDist = Infinity;
       if (hits.length > 0) {
-        hitDist = hits[0].distance;
-        hitPoint = hits[0].point;
-        let obj = hits[0].object;
+        // v9 (probe-v9-officer-debug2): the first hit can be a
+        // pure GLOW SPRITE — a police car's light halo, a lamp
+        // glow — a transparent light billboard parked in front of
+        // a fire-mode officer ate every bullet aimed at him (and
+        // gated the capsule assist via hitDist). Glow is not
+        // cover: the first NON-sprite hit is the real surface.
+        const h0 = hits.find((h) => !h.object.isSprite) || hits[0];
+        hitDist = h0.distance;
+        hitPoint = h0.point;
+        let obj = h0.object;
         while (obj.parent && !obj.userData.isPerson && !obj.userData.style && obj.parent !== this.scene) {
           obj = obj.parent;
         }
         hitObj = obj;
       }
-      // 2-degree magnetism toward a hostile figure
-      const magRad = Math.tan(2 * Math.PI / 180);
-      for (const fig of this.hostiles) {
-        if (fig.userData.dead || fig.userData.knock) continue;
-        const c = this._perpCandidate(camera, fig, st.range);
-        if (c && c.perp <= Math.max(0.35, c.t * magRad) && c.t < hitDist) {
-          hitObj = fig;
-          hitPoint = this._hitPoint.set(fig.position.x, fig.position.y + 1.05, fig.position.z);
-          hitDist = c.t;
-          break;
-        }
+      // v9 capsule assist: EVERY person (pedestrian, officer,
+      // gang) whose body capsule crosses this pellet's ray takes
+      // the bullet — the nearest one not hidden behind whatever
+      // the mesh ray already struck. This replaces the old
+      // hostiles-only 2-degree magnetism, which left pedestrians
+      // and close-range targets effectively unhittable.
+      let bestC = null;
+      for (const fig of this.persons) {
+        const c = this._personCandidate(camera.position, d, fig, st.range);
+        if (c && c.t < hitDist - 0.25 && (!bestC || c.t < bestC.t)) bestC = c;
+      }
+      if (bestC) {
+        hitObj = bestC.fig;
+        hitPoint = this._hitPoint.set(bestC.fig.position.x, bestC.fig.position.y + 1.05, bestC.fig.position.z);
+        hitDist = bestC.t;
       }
       if (hitPoint) {
         anyHit = true;

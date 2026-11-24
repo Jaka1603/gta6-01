@@ -1,4 +1,54 @@
 
+## v9 — PALMBAY HEAT, ronde feedback play-test Jaka (20 Nov): damage tembakan NYATA + kontrol jauh lebih mudah
+
+Jaka main v8 sendiri dan lapor: (1) kontrol masih sulit dikendalikan — cari referensi top 1; (2) damage tembakan "tidak ada" — menembak orang berjalan/polisi harusnya kena damage; (3) samakan perjalanan misi, adu tembak, dan kontrol dengan top 1. Top 1 tetap tidak bisa dimainkan (source ditahan s.d. 24 Nov 15:00 UTC) — yang ditiru dari LEARNINGS.md adalah RASANYA: kamera over-shoulder saat menembak, hit feedback terlihat, musuh bereaksi & jatuh. Tanpa push, tanpa submit — commit lokal saja.
+
+**Akar masalah damage — DIBUKTIKAN dengan probe baru `probe-v9-damage.mjs` (pistol, bidik manual centre-mass, kamera settle, target hp 100):**
+
+| Skenario | v8 (SEBELUM) | v9 (SESUDAH) |
+|---|---|---|
+| Pejalan kaki diam 3,5 m | **0/3** | **3/3** |
+| Pejalan kaki diam 5 m | **0/3** | **3/3** |
+| Pejalan kaki diam 10 m | 3/3 | 3/3 |
+| Pejalan kaki diam 15 m | (tak selesai di sel lambat) | 3/3 |
+| Pejalan kaki berjalan ±10 m | 2/3 | **3/3** |
+| Geng diam 10 m | 3/3 | 3/3 |
+| Geng berjalan ±10 m | 3/3 | 3/3 |
+| Polisi diam (mode fire) | **0/3** | **3/3** |
+| Polisi anchor bergerak | 2/3 | **3/3** |
+| Tembakan balasan polisi 6 dtk | HP pemain 94→45 | HP pemain 100→45 |
+| Elemen hitmarker | tidak ada | ada |
+
+Tiga penyebab bertumpuk, semuanya terukur:
+1. **Ray tembakan konvergen lewat di atas kepala pada jarak dekat.** `_aimDir` mengkonvergenkan ray ke titik 12 m di depan pemain setinggi dada; dari kamera follow (3 m di atas, 6,5 m di belakang), ray baru masuk pita torso di ±8–13 m. Terukur: tinggi ray di target 1,99 m @3,5 m dan 1,84 m @5 m — bersih di atas figur 1,81 m. Pejalan kaki juga TIDAK punya aim magnetism sama sekali (magnetism 2° cuma untuk `hostiles` = geng). Jadi bidikan badan yang benar di jarak ngobrol = 0 hit, dan tanpa feedback apa pun game terbaca "peluru tidak ada damage-nya".
+2. **Sprite glow memakan peluru.** Hit mesh pertama bisa berupa Sprite cahaya transparan (halo lampu mobil polisi @13,7 m) yang duduk di depan target — bullet berhenti di cahaya. Terukur via `probe-v9-officer-debug2.mjs` (rantai hit: Sprite→Group→Group→Group→Scene).
+3. **Polisi berlindung permanen di balik kabin mobilnya sendiri.** Anchor tembak officer selalu di garis mobil→pemain (terukur: bodi sedan @13,92 m, tubuh officer @15,51 m pada ray yang sama), sementara tembakan balasnya bebas — adu tembak satu arah.
+
+**Perbaikan damage & adu tembak:**
+- **Aim assist kapsul untuk SEMUA orang** (combat.js `_personCandidate` + `combat.persons` di-refresh di main): setiap figur (pejalan kaki, polisi, geng) diuji sebagai kapsul vertikal r=0,55 m dengan pita badan −0,35..2,35 terhadap ray tembakan; kandidat terdekat yang tidak terhalang hit mesh menang. Menggantikan magnetism hostiles-only. Bidikan badan kini kena di semua jarak & saat target berjalan (tabel di atas).
+- **Raycast melewati sprite glow murni** saat memilih hit (halo cahaya bukan cover) — hit non-sprite pertama yang dipakai.
+- **Officer melangkah keluar dari balik mobilnya**: anchor tembak digeser 2,3 m menyamping dari garis mobil→pemain (police.js) — posisi menembak di SAMPING mobil, garis tembak bersih dua arah. Terukur sesudahnya: mobil @18,27 m (di belakang officer @15,51 m), hit pertama selalu PERSON.
+- **Tuning**: pistol 34 (3 tembakan menjatuhkan orang; officer hp 120 = 4 tembakan), heavy 68, rifle 46→50, SMG 16, shotgun 11→15/pellet ×7 (1–2 tembakan). Damage NPC ke pemain tidak diubah (v6 ballistics; terukur ±55 HP/6 dtk dari satu officer jarak dekat — tekanan nyata, bukan one-shot).
+- **Feedback per-kena (baru semua)**: hitmarker ✕ di crosshair (merah + lebih lama saat kill, hud.js `hitmark()`), figur yang kena berkedip merah 0,14 dtk (people.js flashMats/updateHitFlashes), stagger/reel terlihat (pejalan kaki: lengan terangkat + torso menekuk; officer & rifleman geng: flinch + jeda tembak), bunyi 'hit'/'kill' (audio.js), hitstop kecil + trauma saat kill.
+- **Misi**: THE CHASE kini memuat adu tembak sungguhan — jalan kaki di turf geng selama misi aktif memprovokasi kru rival (rifleman menembak balik dengan damage dua arah, sisanya brawl). Struktur multi-stage v8 tidak diubah.
+
+**Kontrol (feedback #1):**
+- Mobil: lock setir menyusut terhadap kecepatan (×(1−0,38·|v|/max)) + fade yaw diperdalam (0,15→0,35) — full lock ±0,81 rad/dtk @34 m/dtk, tetap responsif ±1,4 @15 m/dtk; smoothing setir dilunakkan (8/11→7/9); kurva gas awal lebih halus (t·(0,62+0,38t)); rem S saat melaju lebih pakem (−0,7→−1,15, handbrake −1,4→−1,6); kamera kejar lebih tenang (follow yaw 4,2→3,6, SmoothDamp 0,34→0,42, auto-centre decay 0,5→0,35, follow jalan kaki 5,4→5,2).
+- Jalan kaki: **kamera bidik over-shoulder ala top 1** — saat bersenjata & menembak (atau ≤1,1 dtk sesudah tembakan terakhir) kamera merapat ke bahu kanan (jarak 6,5→3,6, tinggi 3,0→2,05, geser bahu 0,85 m pada kamera + target pandang), badan Dario menghadap arah bidik (20 rad/dtk); aim assist kapsul di atas.
+- Sentuh: deadzone stick 0,10→0,13, radius travel 70→78 px (basis stick 140→156 px, knob 39→46 px), sensitivitas drag kamera 0,0055→0,0039 rad/px (mouse 0,0052→0,0046), tombol ATK 88→98 px. Layout v8 tidak berubah.
+
+**Screenshot dossier:** `1-cover.jpg` (185 KB — kejar-kejaran siang + KITE-1, mode `v9chase`), `2-night.jpg` (130 KB — ADU TEMBAK malam di turf: target menyala merah kena hit + hitmarker kill + tracer + crewman tumbang, mode baru `v9fight`), `3-stats.jpg` (169 KB, `v9stats`), `4-title.jpg` (167 KB, `v9title`; tagline judul kini v9). `shots.json` diperbarui.
+
+**Hasil tes (lingkungan SwiftShader cell bersama — sangat lambat dan TIDAK stabil sesi ini: dua kali restart VM di tengah run, jam sim berjalan ±10× lebih lambat dari waktu nyata karena dt ter-clamp 0,05/frame):**
+- Suite v8: **49/49** (run penuh dengan kode v9, termasuk draw call dalam anggaran + nol error).
+- Mobile: **20/20** · v4: **19/19** · v3: **39/39** — run penuh.
+- Suite v7: parsial — 9 PASS, 1 FAIL, lalu timeout 1.500 dtk di seksi dermaga. FAIL-nya ("officer deploys LIVE") adalah poll REAL-TIME 300 dtk yang kelaparan di sel lambat: dibuktikan bukan regresi oleh `probe-v9-focus.mjs` (replikasi staging persis, poll waktu-SIM 90 dtk) → **DEPLOY PASS**. Run pra-restart juga sempat melewati seksi yang sama sebelum browser-nya mati di seksi dermaga.
+- Suite v6: parsial — 23 PASS, 2 FAIL, lalu timeout. Kedua FAIL adalah pasangan duel AUTO (lock-on poll real-time 20 dtk + tembakan sesudahnya); di staging yang sama **MANUAL lulus di dalam suite** (hp 100→66), dan probe fokus waktu-sim membuktikan **AUTO LOCK PASS + AUTO SHOT PASS (100→66)**. Seksi kontrol yang relevan dengan retune v9 lulus di dalam suite: reversal turn progresif, camera jerk bounded (maks 264 < 900), interior, pickup senjata.
+- Suite v5: parsial — 22 PASS, **0 FAIL** saat restart VM membunuhnya (bukan kegagalan uji). Isu lama v5 dari baseline v8 (1 assert brake-exit basi + timeout real-time) bahkan tidak sempat muncul di porsi yang selesai.
+- Probe damage (tabel di atas) + probe fokus: semua PASS, nol page error. Timeout navigasi suite v5/v4/v3 di percobaan pertama batch adalah timeout 'load' 60 dtk milik suite vs worldgen ±57 dtk+ di sel terdegradasi — timeout tooling dinaikkan ke 240 dtk (file probe di shottools, bukan kode game), sesudah itu v4/v3 lulus penuh.
+
+**Sisa kekurangan yang jujur:** (1) suite v7/v6/v5 tidak berhasil dijalankan sampai TAMAT sesi ini karena lingkungan (2 restart VM + sel ±10× lebih lambat); setiap FAIL yang muncul sudah dibuktikan satu per satu sebagai artefak timing dengan poll waktu-sim — tapi run penuh ketiganya tetap utang verifikasi di lingkungan sehat. (2) Tembakan balasan satu officer jarak dekat berat (±55 HP/6 dtk bila pemain diam) — ballistics v6 tidak diubah; pemain harus bergerak/berlindung. (3) Assist kapsul 0,55 m memang murah hati by design: tembakan yang secara visual menyerempet dihitung kena — pilihan feel yang disengaja, dicatat apa adanya. (4) Cacat kosmetik warisan v8 masih ada: baris status kanan-atas pudar di langit siang (terlihat juga di cover baru), glow lampu besar saat kamera sangat dekat, panel pause tembus pandang di atas kota ramai (teks tetap terbaca di shot stats baru). (5) Belum ada play-test manusia untuk v9; rekaman bersih untuk submit tetap pekerjaan terpisah (batas lomba 24 Nov 22:00 WIB).
+
 ## v8 — PALMBAY HEAT, pelajaran top 1 "Karimbu" + audit ulang dari nol (19 Nov malam)
 
 Perintah Jaka: pelajari game top 1 kompetisi (LEARNINGS.md — penilaian pairwise berbasis screenshot, jadi 4 screenshot dossier ADALAH permainannya), terapkan pelajarannya, audit ulang dari nol, perbaiki SEMUA bug. Tanpa push, tanpa submit — commit lokal saja.

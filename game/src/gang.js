@@ -85,6 +85,7 @@ export function makeOfficer() {
   brim.position.set(0, 1.755, 0.17);
   p.add(brim);
   p.userData.officer = true;
+  p.userData.hp = 120;   // v9: officers are a little tougher (4 pistol hits)
   return p;
 }
 

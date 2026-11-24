@@ -70,6 +70,10 @@ export class HUD {
     mk('hud-phone', 'hud phone', '');
     // crosshair
     mk('hud-cross', 'hud cross', '+');
+    // v9: hitmarker — flashes over the crosshair on every landed
+    // hit (red + longer on a kill), the top-1's "reticle hit" read
+    const hm = mk('hud-hitmark', 'hud hitmark', '✕');
+    hm.style.display = 'none';
     // v6: aim-mode indicator (AUTO lock-on / MANUAL crosshair)
     mk('hud-aim', 'hud aim', '');
     // v6: lock-on tag under the crosshair while AUTO has a target
@@ -417,6 +421,21 @@ export class HUD {
   }
   setLockTag(on) {
     this.el['hud-lock'].style.display = on ? 'block' : 'none';
+  }
+  // v9: per-hit confirmation at the crosshair
+  hitmark(kill = false) {
+    const el = this.el['hud-hitmark'];
+    if (!el) return;
+    el.style.display = 'block';
+    el.classList.toggle('kill', !!kill);
+    el.classList.remove('show');
+    void el.offsetWidth;   // restart the pop
+    el.classList.add('show');
+    clearTimeout(this._hmT);
+    this._hmT = setTimeout(() => {
+      el.classList.remove('show');
+      el.style.display = 'none';
+    }, kill ? 240 : 130);
   }
   setCash(n) { this.el['hud-cash'].textContent = '$' + Math.floor(n).toLocaleString('en-US'); }
   setClock(minutes) {

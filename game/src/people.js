@@ -278,6 +278,37 @@ export function updateKnock(person, dt) {
   return true;
 }
 
+// --- v9 hit flash: a landed hit must READ on the figure ---------
+// hurtPerson paints the figure's materials red for ~0.14 s; the
+// registry is advanced once per frame by main (updateHitFlashes).
+// Materials are per-person (makePerson builds fresh ones), so the
+// flash never bleeds onto bystanders.
+const flashSet = new Set();
+function flashMats(person) {
+  const u = person.userData;
+  if (!u._flashMats) {
+    const mats = [];
+    person.traverse((o) => {
+      if (o.isMesh && o.material && 'emissive' in o.material && !mats.includes(o.material)) {
+        mats.push(o.material);
+      }
+    });
+    u._flashMats = mats;
+  }
+  return u._flashMats;
+}
+export function updateHitFlashes(dt) {
+  if (!flashSet.size) return;
+  for (const person of flashSet) {
+    const u = person.userData;
+    u.flashT -= dt;
+    if (u.flashT <= 0) {
+      for (const m of flashMats(person)) m.emissive.setHex(0x000000);
+      flashSet.delete(person);
+    }
+  }
+}
+
 // --- v6 damage + fist-fighting (brief M) ---------------------------
 // hurtPerson applies damage to any minifig: stagger on solid hits,
 // a long knockdown at 0 hp (dead — owners stop driving the figure).
@@ -286,6 +317,15 @@ export function hurtPerson(person, dmg, fromX = 0, fromZ = 0) {
   const u = person.userData;
   if (u.dead) return 'dead';
   u.hp -= dmg;
+  // v9: visible hit feedback on every landed blow
+  if (dmg > 0) {
+    u.flashT = 0.14;
+    for (const m of flashMats(person)) {
+      m.emissive.setHex(0xff2015);
+      m.emissiveIntensity = 0.9;
+    }
+    flashSet.add(person);
+  }
   if (u.hp <= 0) {
     u.dead = true;
     u.aiState = 'dead';
@@ -633,6 +673,15 @@ export class Pedestrians {
         u.fleeing = true;
         u.fleeTimer = 1.2;
         u.speed = 4.2;
+      }
+      // v9: a solid hit REELS a non-brawling pedestrian — arms
+      // flung up, torso bent back, rooted for the stagger span —
+      // so gunfire visibly does something even before the fall.
+      if (u.staggerT > 0) {
+        u.staggerT -= dt;
+        u.armL.rotation.x = -2.5; u.armR.rotation.x = -2.2;
+        u.upper.rotation.x = -0.22;
+        continue;
       }
       if (u.fleeTimer !== undefined) {
         u.fleeTimer -= dt;
